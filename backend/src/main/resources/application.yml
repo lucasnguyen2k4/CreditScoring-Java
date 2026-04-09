@@ -1,0 +1,33 @@
+spring:
+  application:
+    name: CreditScoringBackend
+  
+  # MongoDB
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/creditscoring
+      database: creditscoring
+
+  # File upload limits
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+
+# Server
+server:
+  port: 8080
+
+# JWT
+jwt:
+  secret: YourSuperSecretKeyForJWTTokenGeneration2024CreditScoringApp!@#$%
+  expiration-ms: 86400000  # 24 hours
+
+# ML Service URL
+ml-service:
+  url: http://localhost:8000
+
+# CORS
+cors:
+  allowed-origins: http://localhost:5173,http://localhost:3000
+
