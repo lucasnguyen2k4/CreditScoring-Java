@@ -1,0 +1,37 @@
+# FastAPI Framework
+fastapi==0.115.0
+uvicorn==0.30.1
+python-multipart==0.0.9
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.2
+
+# Machine Learning
+scikit-learn==1.5.2
+xgboost==2.0.3
+lightgbm==4.1.0
+catboost==1.2.2
+imbalanced-learn==0.12.4
+optuna==3.5.0
+optbinning==0.19.0
+
+# Model Explanation
+shap==0.44.0
+
+# Visualization (for server-side chart generation)
+plotly==5.18.0
+matplotlib==3.8.2
+seaborn==0.13.0
+
+# Statistical Analysis
+statsmodels==0.14.1
+scipy==1.11.4
+
+# LLM Integration
+google-generativeai==0.7.2
+protobuf==4.25.8
+
+# Utilities
+python-dotenv==1.0.0
+Pillow==10.1.0
