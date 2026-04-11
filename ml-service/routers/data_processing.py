@@ -38,6 +38,26 @@ def df_to_json(df: pd.DataFrame, max_rows: int = 500) -> dict:
     }
 
 
+def to_finite_numeric(series: pd.Series) -> pd.Series:
+    """Convert to numeric and drop non-finite values as NaN."""
+    return pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+
+def to_finite_float(value: Any) -> Optional[float]:
+    """Convert value to float and return None for NaN/inf."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if np.isfinite(result) else None
+
+
+def safe_round(value: Any, digits: int = 4) -> Optional[float]:
+    """Round finite floats and return None for invalid values."""
+    finite = to_finite_float(value)
+    return round(finite, digits) if finite is not None else None
+
+
 # ========================= UPLOAD =========================
 
 @router.post("/upload")
@@ -115,7 +135,7 @@ def get_statistics(x_session_id: str = Header(..., alias="X-Session-ID")):
     numeric_df = df.select_dtypes(include=[np.number])
     stats = {}
     for col in numeric_df.columns:
-        col_data = df[col].dropna()
+        col_data = to_finite_numeric(df[col]).dropna()
         if len(col_data) == 0:
             continue
         q1 = float(col_data.quantile(0.25))
@@ -124,15 +144,15 @@ def get_statistics(x_session_id: str = Header(..., alias="X-Session-ID")):
         outliers = col_data[(col_data < q1 - 1.5 * iqr) | (col_data > q3 + 1.5 * iqr)]
         stats[col] = {
             "count": int(col_data.count()),
-            "mean": float(col_data.mean()),
-            "median": float(col_data.median()),
-            "std": float(col_data.std()),
-            "min": float(col_data.min()),
-            "max": float(col_data.max()),
-            "q1": q1, "q3": q3, "iqr": iqr,
+            "mean": to_finite_float(col_data.mean()),
+            "median": to_finite_float(col_data.median()),
+            "std": to_finite_float(col_data.std()),
+            "min": to_finite_float(col_data.min()),
+            "max": to_finite_float(col_data.max()),
+            "q1": to_finite_float(q1), "q3": to_finite_float(q3), "iqr": to_finite_float(iqr),
             "outliers_count": len(outliers),
-            "skewness": float(col_data.skew()),
-            "kurtosis": float(col_data.kurtosis()),
+            "skewness": to_finite_float(col_data.skew()),
+            "kurtosis": to_finite_float(col_data.kurtosis()),
         }
 
     return {"numeric_stats": stats}
@@ -154,11 +174,12 @@ def get_column_distribution(
         raise HTTPException(status_code=404, detail=f"Column '{column}' not found")
 
     series = df[column]
-    clean = series.dropna()
-    if clean.empty:
-        raise HTTPException(status_code=400, detail=f"Column '{column}' has no non-null values")
 
     if pd.api.types.is_numeric_dtype(series):
+        clean = to_finite_numeric(series).dropna()
+        if clean.empty:
+            raise HTTPException(status_code=400, detail=f"Column '{column}' has no finite numeric values")
+
         hist_counts, bin_edges = np.histogram(clean, bins=max(5, min(int(bins), 40)))
         q1 = float(clean.quantile(0.25))
         q3 = float(clean.quantile(0.75))
@@ -177,9 +198,9 @@ def get_column_distribution(
             "p95": round(float(clean.quantile(0.95)), 4),
             "p99": round(float(clean.quantile(0.99)), 4),
         }
-        mean_val = float(clean.mean())
-        std_val = float(clean.std())
-        cv = (std_val / mean_val * 100.0) if mean_val != 0 else None
+        mean_val = to_finite_float(clean.mean())
+        std_val = to_finite_float(clean.std())
+        cv = (std_val / mean_val * 100.0) if (std_val is not None and mean_val not in (None, 0.0)) else None
 
         histogram = []
         for i, count in enumerate(hist_counts):
@@ -199,35 +220,39 @@ def get_column_distribution(
             "histogram": histogram,
             "outlier_values": outlier_values,
             "box_stats": {
-                "min": round(float(clean.min()), 4),
-                "q1": round(q1, 4),
-                "median": round(float(clean.median()), 4),
-                "q3": round(q3, 4),
-                "max": round(float(clean.max()), 4),
-                "lower_bound": round(float(lower_bound), 4),
-                "upper_bound": round(float(upper_bound), 4),
+                "min": safe_round(clean.min(), 4),
+                "q1": safe_round(q1, 4),
+                "median": safe_round(clean.median(), 4),
+                "q3": safe_round(q3, 4),
+                "max": safe_round(clean.max(), 4),
+                "lower_bound": safe_round(lower_bound, 4),
+                "upper_bound": safe_round(upper_bound, 4),
             },
             "summary": {
                 "count": int(clean.count()),
-                "mean": round(mean_val, 4),
-                "median": round(float(clean.median()), 4),
-                "std": round(std_val, 4),
-                "min": round(float(clean.min()), 4),
-                "q1": round(q1, 4),
-                "q3": round(q3, 4),
-                "max": round(float(clean.max()), 4),
-                "skewness": round(float(clean.skew()), 4),
-                "kurtosis": round(float(clean.kurtosis()), 4),
-                "range": round(float(clean.max() - clean.min()), 4),
-                "cv_pct": round(cv, 4) if cv is not None else None,
-                "iqr": round(iqr, 4),
-                "lower_bound": round(float(lower_bound), 4),
-                "upper_bound": round(float(upper_bound), 4),
+                "mean": safe_round(mean_val, 4),
+                "median": safe_round(clean.median(), 4),
+                "std": safe_round(std_val, 4),
+                "min": safe_round(clean.min(), 4),
+                "q1": safe_round(q1, 4),
+                "q3": safe_round(q3, 4),
+                "max": safe_round(clean.max(), 4),
+                "skewness": safe_round(clean.skew(), 4),
+                "kurtosis": safe_round(clean.kurtosis(), 4),
+                "range": safe_round(clean.max() - clean.min(), 4),
+                "cv_pct": safe_round(cv, 4) if cv is not None else None,
+                "iqr": safe_round(iqr, 4),
+                "lower_bound": safe_round(lower_bound, 4),
+                "upper_bound": safe_round(upper_bound, 4),
                 "outliers_count": outliers_count,
                 "outliers_ratio_pct": round((outliers_count / max(1, int(clean.count()))) * 100.0, 4),
                 "quantiles": quantiles,
             },
         }
+
+    clean = series.dropna()
+    if clean.empty:
+        raise HTTPException(status_code=400, detail=f"Column '{column}' has no non-null values")
 
     counts = clean.astype(str).value_counts().head(15)
     return {
@@ -500,7 +525,7 @@ def get_correlation_matrix(
     if df is None:
         raise HTTPException(status_code=404, detail="No data loaded")
 
-    numeric_df = df.select_dtypes(include=[np.number])
+    numeric_df = df.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan)
     if numeric_df.shape[1] < 2:
         raise HTTPException(status_code=400, detail="Need at least 2 numeric columns")
 
@@ -558,9 +583,14 @@ def get_joint_distribution(
     if column_x not in df.columns or column_y not in df.columns:
         raise HTTPException(status_code=404, detail="One or both columns not found")
 
-    pair_df = df[[column_x, column_y]].dropna()
+    pair_df = df[[column_x, column_y]].copy()
+    if pd.api.types.is_numeric_dtype(df[column_x]):
+        pair_df[column_x] = to_finite_numeric(pair_df[column_x])
+    if pd.api.types.is_numeric_dtype(df[column_y]):
+        pair_df[column_y] = to_finite_numeric(pair_df[column_y])
+    pair_df = pair_df.dropna()
     if pair_df.empty:
-        raise HTTPException(status_code=400, detail="No non-null paired values for selected columns")
+        raise HTTPException(status_code=400, detail="No valid paired values for selected columns")
 
     n_bins = max(3, min(int(bins), 20))
 
@@ -640,9 +670,9 @@ def get_scatter_matrix(req: ScatterMatrixRequest, x_session_id: str = Header(...
     if len(numeric_cols) < 2:
         raise HTTPException(status_code=400, detail="Need at least 2 numeric columns")
 
-    work = df[numeric_cols].apply(pd.to_numeric, errors="coerce").dropna()
+    work = df[numeric_cols].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
     if work.empty:
-        raise HTTPException(status_code=400, detail="No non-null paired numeric values for selected columns")
+        raise HTTPException(status_code=400, detail="No finite paired numeric values for selected columns")
 
     max_points = max(100, min(int(req.max_points), 5000))
     total_rows = int(work.shape[0])
@@ -686,7 +716,7 @@ def get_grouped_analysis(
     if value_column not in df.columns or group_column not in df.columns:
         raise HTTPException(status_code=404, detail="Value or group column not found")
 
-    value_series = pd.to_numeric(df[value_column], errors="coerce")
+    value_series = to_finite_numeric(df[value_column])
     group_series = df[group_column].astype(str)
     pair_df = pd.DataFrame({"group": group_series, "value": value_series}).dropna(subset=["group", "value"])
     if pair_df.empty:
@@ -783,14 +813,14 @@ def get_scatter_2d(
     use_hue = bool(hue_column and hue_column in df.columns and hue_column not in {column_x, column_y})
     cols = [column_x, column_y] + ([hue_column] if use_hue else [])
     work = df[cols].copy()
-    work[column_x] = pd.to_numeric(work[column_x], errors="coerce")
-    work[column_y] = pd.to_numeric(work[column_y], errors="coerce")
+    work[column_x] = to_finite_numeric(work[column_x])
+    work[column_y] = to_finite_numeric(work[column_y])
     work = work.dropna(subset=[column_x, column_y])
     if work.empty:
-        raise HTTPException(status_code=400, detail="No valid paired numeric values for selected columns")
+        raise HTTPException(status_code=400, detail="No finite paired numeric values for selected columns")
 
     if use_hue:
-        work[hue_column] = work[hue_column].astype(str).fillna("__MISSING__")
+        work[hue_column] = work[hue_column].fillna("__MISSING__").astype(str)
     else:
         work["__hue__"] = "All"
         hue_column = "__hue__"

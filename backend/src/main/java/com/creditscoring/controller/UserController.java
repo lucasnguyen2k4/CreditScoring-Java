@@ -62,7 +62,7 @@ public class UserController {
     }
 
     @PutMapping("/{id}")
-    public ResponseEntity<?> updateUser(@PathVariable String id, @RequestBody Map<String, String> body) {
+    public ResponseEntity<?> updateUser(@PathVariable("id") String id, @RequestBody Map<String, String> body) {
         var userOpt = userRepository.findById(id);
         if (userOpt.isEmpty()) {
             return ResponseEntity.notFound().build();
@@ -79,7 +79,7 @@ public class UserController {
     }
 
     @DeleteMapping("/{id}")
-    public ResponseEntity<?> deleteUser(@PathVariable String id) {
+    public ResponseEntity<?> deleteUser(@PathVariable("id") String id) {
         if (!userRepository.existsById(id)) {
             return ResponseEntity.notFound().build();
         }

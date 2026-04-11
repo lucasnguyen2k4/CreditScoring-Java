@@ -219,6 +219,58 @@ export default function DataUploadPage() {
   const [groupedLoading, setGroupedLoading] = useState(false);
   const [groupChartType, setGroupChartType] = useState('box');
   const fileRef = useRef();
+  const [initialLoading, setInitialLoading] = useState(true);
+
+  // Auto-restore data if already uploaded on the backend (e.g. after navigating away and back)
+  useEffect(() => {
+    let cancelled = false;
+    const restoreSession = async () => {
+      try {
+        const sessionRes = await dataApi.getSessionInfo();
+        if (cancelled) return;
+        if (!sessionRes.data?.has_data) return;
+
+        // Data exists on the server — fetch preview, info, stats
+        const [previewRes, infoRes, statsRes] = await Promise.all([
+          dataApi.getPreview(100),
+          dataApi.getInfo(),
+          dataApi.getStats(),
+        ]);
+        if (cancelled) return;
+
+        setData(previewRes.data);
+        setInfo(infoRes.data);
+        setStats(statsRes.data.numeric_stats);
+
+        // Set target from session if available
+        if (sessionRes.data.target_column) {
+          setTarget(sessionRes.data.target_column);
+        }
+
+        // Set default columns
+        const numericCols = infoRes.data.numeric_columns || [];
+        const catCols = infoRes.data.categorical_columns || [];
+        const defaultColumn = numericCols[0] || catCols[0] || '';
+        const defaultNumeric = numericCols[0] || '';
+        setVisualColumn(defaultColumn);
+        setAnalysisColumn(defaultNumeric);
+        setScatterColumns(numericCols.slice(0, 5));
+        setGroupValueColumn(defaultNumeric);
+        setGroupByColumn(catCols[0] || infoRes.data.columns?.find((c) => c !== defaultNumeric) || '');
+
+        // Load categorical summary
+        try {
+          const catRes = await dataApi.getCategoricalSummary(false);
+          if (!cancelled) setCategoricalSummary(catRes.data);
+        } catch { /* ignore */ }
+      } catch { /* no session or no data — show upload zone */ }
+      finally {
+        if (!cancelled) setInitialLoading(false);
+      }
+    };
+    restoreSession();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     const columns = [
@@ -601,7 +653,13 @@ export default function DataUploadPage() {
 
       {message && <div className={`alert ${message.startsWith('Error') ? 'alert-error' : 'alert-success'}`}>{message}</div>}
 
-      {!data && (
+      {initialLoading && !data && (
+        <div className="flex items-center gap-sm mt-md" style={{ justifyContent: 'center', padding: 40 }}>
+          <div className="spinner" /> Loading session data...
+        </div>
+      )}
+
+      {!data && !initialLoading && (
         <div className="upload-zone" onClick={() => fileRef.current?.click()}>
           <Upload size={40} style={{ color: 'var(--text-muted)', marginBottom: 12 }} />
           <div style={{ fontWeight: 600, marginBottom: 4 }}>Click to upload CSV file</div>

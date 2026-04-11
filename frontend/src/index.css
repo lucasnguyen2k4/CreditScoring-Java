@@ -795,3 +795,149 @@ tr:hover td {
 .gap-lg { gap: 24px; }
 .mt-md { margin-top: 16px; }
 .mb-md { margin-bottom: 16px; }
+
+/* ==================== Cleanup Panels ==================== */
+
+.cleanup-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 900px) {
+  .cleanup-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.cleanup-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.cleanup-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.cleanup-panel-icon {
+  font-size: 16px;
+}
+
+.cleanup-panel-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+
+.cleanup-callout {
+  display: flex;
+  gap: 10px;
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.cleanup-callout-info {
+  background: var(--info-bg);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  color: var(--text-primary);
+}
+
+.cleanup-callout-warning {
+  background: var(--warning-bg);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  color: var(--text-primary);
+}
+
+.cleanup-callout-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+  margin-top: 1px;
+}
+
+.cleanup-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--info-bg);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--info);
+  margin-bottom: 14px;
+}
+
+.cleanup-badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--info);
+  flex-shrink: 0;
+}
+
+/* ==================== Outlier Metric Cards ==================== */
+
+.outlier-metric-card {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  min-width: 120px;
+}
+
+.outlier-metric-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.outlier-metric-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.1;
+}
+
+/* ==================== Skew Badge ==================== */
+
+.skew-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  text-align: center;
+}
+
+.skew-badge-good {
+  background: rgba(16, 185, 129, 0.18);
+  color: var(--success);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.skew-badge-warn {
+  background: rgba(245, 158, 11, 0.14);
+  color: var(--warning);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.skew-badge-bad {
+  background: rgba(239, 68, 68, 0.14);
+  color: var(--error);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+}

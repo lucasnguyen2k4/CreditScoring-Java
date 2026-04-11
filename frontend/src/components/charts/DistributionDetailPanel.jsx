@@ -11,7 +11,7 @@ function formatNumber(value, digits = 2) {
   });
 }
 
-function BoxOutlierPlot({ summary, outlierValues = [] }) {
+export function BoxOutlierPlot({ summary, outlierValues = [] }) {
   if (!summary) return null;
 
   const box = {

@@ -92,7 +92,7 @@ public class MlProxyController {
 
     @PostMapping("/data/{action}")
     public ResponseEntity<String> proxyDataPost(
-            @PathVariable String action,
+            @PathVariable("action") String action,
             @RequestBody(required = false) String body,
             HttpServletRequest request) {
         if ("upload".equals(action)) {
