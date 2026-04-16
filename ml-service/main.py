@@ -6,7 +6,7 @@ Provides REST API endpoints for all ML operations:
   - Model training (7 algorithms + stacking)
   - Prediction & credit scoring
   - SHAP explainability
-  - LLM-powered analysis (Gemini)
+  - LLM-powered analysis (Gemini)ri
 """
 
 from fastapi import FastAPI

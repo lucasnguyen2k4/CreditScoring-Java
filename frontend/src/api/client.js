@@ -53,8 +53,10 @@ export const dataApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
   },
-  getInfo: () => api.get('/api/ml/data/info'),
+  getInfo: (useRaw = false) =>
+    api.get('/api/ml/data/info', { params: useRaw ? { use_raw: true } : {} }),
   getPreview: (rows = 100) => api.get(`/api/ml/data/preview?rows=${rows}`),
+  generateSample: (records = 100) => api.post(`/api/ml/data/generate-sample?records=${records}`),
   getStats: () => api.get('/api/ml/data/stats'),
   getDistribution: (column, processed = false, bins = 20) =>
     api.get(`/api/ml/data/distribution?column=${encodeURIComponent(column)}&processed=${processed}&bins=${bins}`),
@@ -69,8 +71,8 @@ export const dataApi = {
     api.get(`/api/ml/data/scatter-2d?column_x=${encodeURIComponent(columnX)}&column_y=${encodeURIComponent(columnY)}&processed=${processed}&hue_column=${encodeURIComponent(hueColumn || '')}&max_points=${maxPoints}&bins=${bins}`),
   getCategoricalSummary: (processed = false) =>
     api.get(`/api/ml/data/categorical-summary?processed=${processed}`),
-  removeCategorical: (processed = false, apply_on_splits = false) =>
-    api.post('/api/ml/data/remove-categorical', { processed, apply_on_splits }),
+  removeCategorical: (data) =>
+    api.post('/api/ml/data/remove-categorical', data),
   cleanInvalidNumbers: (data) => api.post('/api/ml/data/clean-invalid-numbers', data),
   setTarget: (target_column) => api.post('/api/ml/data/set-target', { target_column }),
   handleMissing: (data) => api.post('/api/ml/data/handle-missing', data),
@@ -84,6 +86,7 @@ export const dataApi = {
   split: (data) => api.post('/api/ml/data/split', data),
   scale: (data) => api.post('/api/ml/data/scale', data),
   featureImportance: (data) => api.post('/api/ml/data/feature-importance', data),
+  setSelectedFeatures: (columns) => api.post('/api/ml/data/selected-features', { columns }),
   getSessionInfo: () => api.get('/api/ml/data/session-info'),
 };
 

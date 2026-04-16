@@ -71,6 +71,22 @@ def map_tuned_params_for_training(model_type: str, params: Optional[Dict[str, An
     return p
 
 
+def get_selected_training_frames(session):
+    """Return train/valid/test frames using selected features if configured."""
+    if session.X_train is None:
+        raise HTTPException(status_code=400, detail="Data not split yet")
+
+    selected = [c for c in (session.selected_features or []) if c in session.X_train.columns]
+    if not selected:
+        selected = session.X_train.columns.tolist()
+        session.selected_features = selected
+
+    X_train = session.X_train[selected]
+    X_valid = session.X_valid[selected] if session.X_valid is not None else None
+    X_test = session.X_test[selected] if session.X_test is not None else None
+    return X_train, X_valid, X_test
+
+
 # ==================== TRAIN ====================
 
 class TrainRequest(BaseModel):
@@ -86,12 +102,13 @@ def train(req: TrainRequest, x_session_id: str = Header(..., alias="X-Session-ID
         raise HTTPException(status_code=400, detail="Data not split yet. Call /data/split first.")
 
     try:
+        X_train, X_valid, X_test = get_selected_training_frames(session)
         model, metrics = train_model(
-            session.X_train, session.y_train,
-            session.X_test, session.y_test,
+            X_train, session.y_train,
+            X_test, session.y_test,
             model_type=req.model_type,
             params=req.params,
-            X_valid=session.X_valid,
+            X_valid=X_valid,
             y_valid=session.y_valid,
             early_stopping_rounds=req.early_stopping_rounds,
         )
@@ -134,9 +151,10 @@ def train_stacking(req: StackingRequest, x_session_id: str = Header(..., alias="
         raise HTTPException(status_code=400, detail="Data not split yet")
 
     try:
+        X_train, _, X_test = get_selected_training_frames(session)
         model, metrics = train_stacking_model(
-            session.X_train, session.y_train,
-            session.X_test, session.y_test,
+            X_train, session.y_train,
+            X_test, session.y_test,
             base_models=req.base_models,
             meta_model=req.meta_model,
             params=req.params,
@@ -179,8 +197,9 @@ def cross_validate(req: CVRequest, x_session_id: str = Header(..., alias="X-Sess
         raise HTTPException(status_code=400, detail="Data not split yet")
 
     try:
+        X_train, _, _ = get_selected_training_frames(session)
         result = cross_validate_model(
-            session.X_train, session.y_train,
+            X_train, session.y_train,
             model_type=req.model_type,
             params=req.params,
             cv_folds=req.cv_folds,
@@ -209,8 +228,9 @@ def tune_model(req: TuneRequest, x_session_id: str = Header(..., alias="X-Sessio
         raise HTTPException(status_code=400, detail="Data not split yet")
 
     try:
+        X_train, X_valid, X_test = get_selected_training_frames(session)
         tuning = hyperparameter_tuning(
-            session.X_train,
+            X_train,
             session.y_train,
             model_type=req.model_type,
             method=req.method,
@@ -234,11 +254,11 @@ def tune_model(req: TuneRequest, x_session_id: str = Header(..., alias="X-Sessio
         if req.auto_train_best:
             best_params = map_tuned_params_for_training(req.model_type, safe_tuning.get("best_params", {}))
             model, metrics = train_model(
-                session.X_train, session.y_train,
-                session.X_test, session.y_test,
+                X_train, session.y_train,
+                X_test, session.y_test,
                 model_type=req.model_type,
                 params=best_params,
-                X_valid=session.X_valid,
+                X_valid=X_valid,
                 y_valid=session.y_valid,
                 early_stopping_rounds=req.early_stopping_rounds,
             )
@@ -283,6 +303,7 @@ def tune_stacking(req: TuneStackingRequest, x_session_id: str = Header(..., alia
         raise HTTPException(status_code=400, detail="Data not split yet")
 
     try:
+        X_train, _, X_test = get_selected_training_frames(session)
         base_config: Dict[str, Dict[str, Any]] = {}
         provided_base = req.base_models_config or {}
         for model_key in req.base_models:
@@ -291,9 +312,9 @@ def tune_stacking(req: TuneStackingRequest, x_session_id: str = Header(..., alia
 
         meta_params = req.meta_model_params or {}
         model, metrics, tuning_info = tune_stacking_with_oof(
-            session.X_train,
+            X_train,
             session.y_train,
-            session.X_test,
+            X_test,
             session.y_test,
             base_models_config=base_config,
             meta_model=req.meta_model,

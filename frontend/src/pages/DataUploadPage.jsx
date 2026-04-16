@@ -189,7 +189,6 @@ export default function DataUploadPage() {
   const [tab, setTab] = useState('preview');
   const [aiAnalysis, setAiAnalysis] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
-  const [target, setTarget] = useState('');
   const [visualColumn, setVisualColumn] = useState('');
   const [visualData, setVisualData] = useState(null);
   const [visualLoading, setVisualLoading] = useState(false);
@@ -241,11 +240,6 @@ export default function DataUploadPage() {
         setData(previewRes.data);
         setInfo(infoRes.data);
         setStats(statsRes.data.numeric_stats);
-
-        // Set target from session if available
-        if (sessionRes.data.target_column) {
-          setTarget(sessionRes.data.target_column);
-        }
 
         // Set default columns
         const numericCols = infoRes.data.numeric_columns || [];
@@ -490,13 +484,36 @@ export default function DataUploadPage() {
     }
   };
 
-  const handleSetTarget = async () => {
-    if (!target) return;
+  const handleGenerateSample = async () => {
+    setLoading(true);
+    setMessage('');
     try {
-      const res = await dataApi.setTarget(target);
+      const res = await dataApi.generateSample(100);
+      setData(res.data.preview);
       setMessage(res.data.message);
+      const [infoRes, statsRes] = await Promise.all([
+        dataApi.getInfo(),
+        dataApi.getStats(),
+      ]);
+      setInfo(infoRes.data);
+      setStats(statsRes.data.numeric_stats);
+      const defaultColumn = infoRes.data.numeric_columns?.[0] || infoRes.data.categorical_columns?.[0] || '';
+      const defaultNumeric = infoRes.data.numeric_columns?.[0] || '';
+      const numericCols = infoRes.data.numeric_columns || [];
+      const catCols = infoRes.data.categorical_columns || [];
+      setVisualColumn(defaultColumn);
+      setAnalysisColumn(defaultNumeric);
+      setAnalysisBins(10);
+      setScatterColumns(numericCols.slice(0, 5));
+      setScatterData(null);
+      setGroupValueColumn(defaultNumeric);
+      setGroupByColumn(catCols[0] || infoRes.data.columns?.find((c) => c !== defaultNumeric) || '');
+      setGroupedData(null);
+      loadCategoricalSummary();
     } catch (err) {
       setMessage('Error: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -660,11 +677,24 @@ export default function DataUploadPage() {
       )}
 
       {!data && !initialLoading && (
-        <div className="upload-zone" onClick={() => fileRef.current?.click()}>
-          <Upload size={40} style={{ color: 'var(--text-muted)', marginBottom: 12 }} />
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>Click to upload CSV file</div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>or drag and drop</div>
-          <input ref={fileRef} type="file" accept=".csv" onChange={handleUpload} hidden />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', alignItems: 'center' }}>
+          <div className="upload-zone" onClick={() => fileRef.current?.click()}>
+            <Upload size={40} style={{ color: 'var(--text-muted)', marginBottom: 12 }} />
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>Click to upload CSV file</div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>or drag and drop</div>
+            <input ref={fileRef} type="file" accept=".csv" onChange={handleUpload} hidden />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No data available?</div>
+            <button 
+              className="btn btn-secondary" 
+              onClick={handleGenerateSample}
+              disabled={loading}
+              style={{ display: 'flex', gap: '8px', alignItems: 'center' }}
+            >
+              <Sparkles size={16} /> Generate Sample Data
+            </button>
+          </div>
         </div>
       )}
 
@@ -674,22 +704,13 @@ export default function DataUploadPage() {
         <>
           {info && (
             <div className="card section">
-              <div className="flex items-center gap-md" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
-                <div className="form-group" style={{ flex: 1, margin: 0, minWidth: 240 }}>
-                  <label className="form-label">Target Column</label>
-                  <select className="form-select" value={target} onChange={(e) => setTarget(e.target.value)}>
-                    <option value="">Select target...</option>
-                    {info.columns?.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                </div>
-                <button className="btn btn-primary" onClick={handleSetTarget} style={{ marginTop: 18 }}>Set Target</button>
+              <div className="flex items-center gap-md" style={{ justifyContent: 'flex-end', marginBottom: 12 }}>
                 <button
                   className="btn btn-secondary"
                   onClick={() => {
                     setData(null);
                     setInfo(null);
                     setStats(null);
-                    setTarget('');
                     setVisualData(null);
                     setVisualColumn('');
                     setAnalysisColumn('');
@@ -709,7 +730,7 @@ export default function DataUploadPage() {
                   }}
                   style={{ marginTop: 18 }}
                 >
-                  Upload New
+                  📤 Upload New Data
                 </button>
               </div>
             </div>

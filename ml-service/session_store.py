@@ -8,7 +8,6 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, Optional
 from datetime import datetime
-import uuid
 
 
 class SessionData:
@@ -59,6 +58,7 @@ class SessionData:
         self.scaling_config: dict = {}
         self.outlier_config: dict = {}
         self.binning_config: dict = {}
+        self.completed_steps: set = set()
 
         # Fitted objects
         self.label_encoders: dict = {}
@@ -104,6 +104,7 @@ class SessionData:
         self.scaling_config = {}
         self.outlier_config = {}
         self.binning_config = {}
+        self.completed_steps = set()
         self.label_encoders = {}
         self.onehot_encoder = None
         self.scaler = None

@@ -17,6 +17,7 @@ from services.encoder import CategoricalEncoder, encode_categorical, recommend_e
 from services.outlier_handler import OutlierHandler, handle_outliers
 from services.balancer import balance_data, get_class_distribution, check_imbalance
 from services.preprocessing_pipeline import PreprocessingPipeline, create_pipeline
+from services.data_generator import generate_sample_data
 
 router = APIRouter()
 
@@ -25,6 +26,14 @@ def get_session(session_id: str):
     if not session_id:
         raise HTTPException(status_code=400, detail="X-Session-ID header is required")
     return store.get_or_create(session_id)
+
+
+def _mark_step_completed(session, step_key: str):
+    """Persist feature-engineering step completion in session state."""
+    try:
+        session.completed_steps.add(step_key)
+    except Exception:
+        session.completed_steps = set([step_key])
 
 
 def df_to_json(df: pd.DataFrame, max_rows: int = 500) -> dict:
@@ -58,6 +67,21 @@ def safe_round(value: Any, digits: int = 4) -> Optional[float]:
     return round(finite, digits) if finite is not None else None
 
 
+def to_jsonable(value: Any):
+    """Convert nested values into JSON-serializable python primitives."""
+    if isinstance(value, dict):
+        return {str(k): to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [to_jsonable(v) for v in value]
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
+
+
 # ========================= UPLOAD =========================
 
 @router.post("/upload")
@@ -83,18 +107,55 @@ async def upload_file(
         raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
 
 
+@router.post("/generate-sample")
+def generate_sample(
+    records: int = 100,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+):
+    """Generate sample credit scoring data and store in session"""
+    session = get_session(x_session_id)
+    try:
+        df = generate_sample_data(n_records=records)
+        session.raw_data = df
+        session.clear_data()
+        session.raw_data = df
+        
+        return {
+            "message": f"Generated sample data: {df.shape[0]} rows, {df.shape[1]} columns",
+            "preview": df_to_json(df, max_rows=100),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error generating data: {str(e)}")
+
+
 # ========================= EDA =========================
 
 @router.get("/info")
-def get_data_info(x_session_id: str = Header(..., alias="X-Session-ID")):
-    """Get basic info about loaded data"""
+def get_data_info(
+    use_raw: bool = False,
+    x_session_id: str = Header(..., alias="X-Session-ID"),
+):
+    """Get basic info about loaded data. When use_raw=true, always use the uploaded raw_data (e.g. for cleanup UI after split)."""
     session = get_session(x_session_id)
-    if session.raw_data is None:
+    if use_raw:
+        df = session.raw_data
+    elif session.X_train is not None:
+        if session.target_column and session.y_train is not None:
+            df = pd.concat([session.X_train, pd.Series(session.y_train, name=session.target_column, index=session.X_train.index)], axis=1)
+        else:
+            df = session.X_train
+    elif session.processed_data is not None:
+        df = session.processed_data
+    else:
+        df = session.raw_data
+
+    if df is None:
         raise HTTPException(status_code=404, detail="No data loaded. Upload a file first.")
 
-    df = session.raw_data
     missing = df.isnull().sum()
     missing_pct = (missing / len(df) * 100).round(2)
+    
+    unique_counts = {col: int(df[col].nunique(dropna=True)) for col in df.columns}
 
     return {
         "shape": list(df.shape),
@@ -104,6 +165,7 @@ def get_data_info(x_session_id: str = Header(..., alias="X-Session-ID")):
             col: {"count": int(missing[col]), "percentage": float(missing_pct[col])}
             for col in df.columns if missing[col] > 0
         },
+        "unique_counts": unique_counts,
         "numeric_columns": df.select_dtypes(include=[np.number]).columns.tolist(),
         "categorical_columns": df.select_dtypes(include=["object", "category"]).columns.tolist(),
         "memory_mb": round(df.memory_usage(deep=True).sum() / 1024 ** 2, 2),
@@ -117,7 +179,17 @@ def get_data_preview(
 ):
     """Get data preview (first N rows)"""
     session = get_session(x_session_id)
-    df = session.processed_data if session.processed_data is not None else session.raw_data
+    
+    if session.X_train is not None:
+        if session.target_column and session.y_train is not None:
+            df = pd.concat([session.X_train, pd.Series(session.y_train, name=session.target_column, index=session.X_train.index)], axis=1)
+        else:
+            df = session.X_train
+    elif session.processed_data is not None:
+        df = session.processed_data
+    else:
+        df = session.raw_data
+
     if df is None:
         raise HTTPException(status_code=404, detail="No data loaded")
 
@@ -128,7 +200,15 @@ def get_data_preview(
 def get_statistics(x_session_id: str = Header(..., alias="X-Session-ID")):
     """Get descriptive statistics for all numeric columns"""
     session = get_session(x_session_id)
-    df = session.raw_data
+    if session.X_train is not None:
+        if session.target_column and session.y_train is not None:
+            df = pd.concat([session.X_train, pd.Series(session.y_train, name=session.target_column, index=session.X_train.index)], axis=1)
+        else:
+            df = session.X_train
+    elif session.processed_data is not None:
+        df = session.processed_data
+    else:
+        df = session.raw_data
     if df is None:
         raise HTTPException(status_code=404, detail="No data loaded")
 
@@ -167,7 +247,15 @@ def get_column_distribution(
 ):
     """Get chart-friendly distribution data for a specific column."""
     session = get_session(x_session_id)
-    df = session.processed_data if processed and session.processed_data is not None else session.raw_data
+    if session.X_train is not None:
+        if session.target_column and session.y_train is not None:
+            df = pd.concat([session.X_train, pd.Series(session.y_train, name=session.target_column, index=session.X_train.index)], axis=1)
+        else:
+            df = session.X_train
+    elif session.processed_data is not None:
+        df = session.processed_data
+    else:
+        df = session.raw_data
     if df is None:
         raise HTTPException(status_code=404, detail="No data loaded")
     if column not in df.columns:
@@ -279,7 +367,15 @@ def get_categorical_summary(
 ):
     """Get summary statistics for all categorical columns."""
     session = get_session(x_session_id)
-    df = session.processed_data if processed and session.processed_data is not None else session.raw_data
+    if session.X_train is not None:
+        if session.target_column and session.y_train is not None:
+            df = pd.concat([session.X_train, pd.Series(session.y_train, name=session.target_column, index=session.X_train.index)], axis=1)
+        else:
+            df = session.X_train
+    elif session.processed_data is not None:
+        df = session.processed_data
+    else:
+        df = session.raw_data
     if df is None:
         raise HTTPException(status_code=404, detail="No data loaded")
 
@@ -312,30 +408,40 @@ def get_categorical_summary(
 
 
 class RemoveCategoricalRequest(BaseModel):
+    columns: Optional[List[str]] = None
     processed: bool = False
     apply_on_splits: bool = False
 
 
 @router.post("/remove-categorical")
 def remove_categorical_columns(req: RemoveCategoricalRequest, x_session_id: str = Header(..., alias="X-Session-ID")):
-    """Remove categorical columns from dataset (EDA cleanup utility)."""
+    """Remove specified columns from dataset (EDA cleanup utility)."""
     session = get_session(x_session_id)
+    target_col = session.target_column
 
     if req.apply_on_splits:
         if session.X_train is None:
             raise HTTPException(status_code=400, detail="Data not split yet. Call /split first.")
 
-        cat_cols = session.X_train.select_dtypes(include=["object", "category"]).columns.tolist()
-        session.X_train = session.X_train.drop(columns=cat_cols, errors="ignore")
+        if req.columns is not None:
+            cols_to_drop = [c for c in req.columns if c in session.X_train.columns]
+        else:
+            cols_to_drop = session.X_train.select_dtypes(include=["object", "category"]).columns.tolist()
+
+        if target_col:
+            cols_to_drop = [c for c in cols_to_drop if c != target_col]
+
+        session.X_train = session.X_train.drop(columns=cols_to_drop, errors="ignore")
         if session.X_valid is not None:
-            session.X_valid = session.X_valid.drop(columns=cat_cols, errors="ignore")
+            session.X_valid = session.X_valid.drop(columns=cols_to_drop, errors="ignore")
         if session.X_test is not None:
-            session.X_test = session.X_test.drop(columns=cat_cols, errors="ignore")
+            session.X_test = session.X_test.drop(columns=cols_to_drop, errors="ignore")
         session.selected_features = session.X_train.columns.tolist()
+        _mark_step_completed(session, "cleanup")
 
         return {
-            "message": f"Removed {len(cat_cols)} categorical columns from train/valid/test splits",
-            "removed_columns": cat_cols,
+            "message": f"Removed {len(cols_to_drop)} columns from train/valid/test splits",
+            "removed_columns": cols_to_drop,
             "train_shape": list(session.X_train.shape),
             "valid_shape": list(session.X_valid.shape) if session.X_valid is not None else None,
             "test_shape": list(session.X_test.shape) if session.X_test is not None else None,
@@ -345,16 +451,24 @@ def remove_categorical_columns(req: RemoveCategoricalRequest, x_session_id: str 
     if df is None:
         raise HTTPException(status_code=404, detail="No data loaded")
 
-    cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
-    result_df = df.drop(columns=cat_cols, errors="ignore").copy()
+    if req.columns is not None:
+        cols_to_drop = [c for c in req.columns if c in df.columns]
+    else:
+        cols_to_drop = df.select_dtypes(include=["object", "category"]).columns.tolist()
+
+    if target_col:
+        cols_to_drop = [c for c in cols_to_drop if c != target_col]
+
+    result_df = df.drop(columns=cols_to_drop, errors="ignore").copy()
 
     # Reset dependent state to avoid stale train/model/shap state.
     session.clear_data()
     session.raw_data = result_df
+    _mark_step_completed(session, "cleanup")
 
     return {
-        "message": f"Removed {len(cat_cols)} categorical columns",
-        "removed_columns": cat_cols,
+        "message": f"Removed {len(cols_to_drop)} columns",
+        "removed_columns": cols_to_drop,
         "new_shape": list(result_df.shape),
     }
 
@@ -449,6 +563,7 @@ def clean_invalid_numbers(req: CleanInvalidNumbersRequest, x_session_id: str = H
         session.X_valid = split_frames["valid"]
         session.X_test = split_frames["test"]
         session.selected_features = session.X_train.columns.tolist()
+        _mark_step_completed(session, "cleanup")
 
         total_invalid = int(sum(v["invalid_count"] for v in invalid_summary.values()))
         return {
@@ -500,6 +615,7 @@ def clean_invalid_numbers(req: CleanInvalidNumbersRequest, x_session_id: str = H
 
     session.clear_data()
     session.raw_data = work_df
+    _mark_step_completed(session, "cleanup")
 
     total_invalid = int(sum(v["invalid_count"] for v in invalid_summary.values()))
     return {
@@ -928,12 +1044,14 @@ def set_target(req: TargetRequest, x_session_id: str = Header(..., alias="X-Sess
 class MissingValueRequest(BaseModel):
     method: str  # Mean Imputation, Median Imputation, Mode Imputation, Constant Value, Drop Rows, Forward Fill, Backward Fill
     columns: List[str]
-    constant_value: Optional[float] = 0
+    constant_value: Optional[float] = None
 
 @router.post("/handle-missing")
 def handle_missing_values(req: MissingValueRequest, x_session_id: str = Header(..., alias="X-Session-ID")):
     """Handle missing values in specified columns"""
     session = get_session(x_session_id)
+    if req.method == "Constant Value" and req.constant_value is None:
+        raise HTTPException(status_code=400, detail="constant_value is required when method is 'Constant Value'")
 
     # Determine which data to work on
     if session.X_train is not None:
@@ -953,6 +1071,7 @@ def handle_missing_values(req: MissingValueRequest, x_session_id: str = Header(.
             session.X_test = session.pipeline.transform_imputation(session.X_test, col)
             results[col] = {"method": req.method, "fill_value": str(info.get("fill_value", "N/A"))}
 
+        _mark_step_completed(session, "missing")
         return {
             "message": f"Missing values handled ({req.method}) on {len(results)} columns (fit on train, transform all splits)",
             "info": results,
@@ -993,6 +1112,7 @@ def handle_missing_values(req: MissingValueRequest, x_session_id: str = Header(.
             results[col] = {"before": missing_before, "after": missing_after}
 
         session.processed_data = result_df
+        _mark_step_completed(session, "missing")
         return {
             "message": f"Missing values handled ({req.method}) on {len(results)} columns",
             "info": results,
@@ -1029,21 +1149,42 @@ def encode_columns(req: EncodingRequest, x_session_id: str = Header(..., alias="
         kwargs["smoothing"] = req.smoothing
 
     try:
-        processed, info = encode_categorical(df, req.method, req.columns, **kwargs)
-        session.processed_data = processed
-        session.encoding_config[f"{req.method}_{','.join(req.columns)}"] = info
-        # Make info JSON serializable
-        safe_info = {}
-        for k, v in info.items():
-            safe_v = {}
-            for k2, v2 in v.items():
-                try:
-                    json.dumps(v2)
-                    safe_v[k2] = v2
-                except (TypeError, ValueError):
-                    safe_v[k2] = str(v2)
-            safe_info[k] = safe_v
-        return {"message": "Encoding applied", "info": safe_info, "new_shape": list(processed.shape)}
+        if session.X_train is not None:
+            if session.pipeline is None: session.pipeline = create_pipeline()
+            for col in req.columns:
+                if col not in session.X_train.columns: continue
+                # We inject target_column explicitly into train_data for target encoding
+                if req.method == "Target Encoding":
+                    temp_train = session.X_train.copy()
+                    temp_train[kwargs["target_column"]] = session.y_train
+                    session.pipeline.fit_encoder(temp_train, col, req.method, **kwargs)
+                else:
+                    session.pipeline.fit_encoder(session.X_train, col, req.method, **kwargs)
+
+                session.X_train = session.pipeline.transform_encoding(session.X_train, col)
+                if session.X_valid is not None and col in session.X_valid.columns:
+                    session.X_valid = session.pipeline.transform_encoding(session.X_valid, col)
+                if session.X_test is not None and col in session.X_test.columns:
+                    session.X_test = session.pipeline.transform_encoding(session.X_test, col)
+            session.selected_features = session.X_train.columns.tolist()
+            _mark_step_completed(session, "encoding")
+            return {"message": "Encoding applied to split datasets", "info": {"columns": req.columns}, "new_shape": list(session.X_train.shape)}
+        else:
+            processed, info = encode_categorical(df, req.method, req.columns, **kwargs)
+            session.processed_data = processed
+            session.encoding_config[f"{req.method}_{','.join(req.columns)}"] = info
+            safe_info = {}
+            for k, v in info.items():
+                safe_v = {}
+                for k2, v2 in v.items():
+                    try:
+                        json.dumps(v2)
+                        safe_v[k2] = v2
+                    except (TypeError, ValueError):
+                        safe_v[k2] = str(v2)
+                safe_info[k] = safe_v
+            _mark_step_completed(session, "encoding")
+            return {"message": "Encoding applied", "info": safe_info, "new_shape": list(processed.shape)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1077,14 +1218,37 @@ def handle_outliers_endpoint(req: OutlierRequest, x_session_id: str = Header(...
         kwargs["threshold"] = req.threshold
 
     try:
-        processed, info = handle_outliers(df, req.method, req.columns, **kwargs)
-        session.processed_data = processed
-        session.outlier_config[f"{req.method}_{','.join(req.columns)}"] = info
-        safe_info = {}
-        for k, v in info.items():
-            safe_v = {k2: (v2 if isinstance(v2, (str, int, float, bool, type(None))) else str(v2)) for k2, v2 in v.items() if k2 != "outliers_mask"}
-            safe_info[k] = safe_v
-        return {"message": "Outliers handled", "info": safe_info, "new_shape": list(processed.shape)}
+        if session.X_train is not None:
+            if session.pipeline is None: session.pipeline = create_pipeline()
+            # For actions that REMOVE rows, we must ALSO update y_train!
+            if req.action == "remove":
+                processed, _ = handle_outliers(session.X_train, req.method, req.columns, **kwargs)
+                kept_indices = processed.index
+                session.X_train = processed
+                session.y_train = session.y_train.loc[kept_indices]
+                # we don't automatically drop validation/test rows to prevent leakage, typically clip them
+            else:
+                for col in req.columns:
+                    if col not in session.X_train.columns: continue
+                    session.pipeline.fit_outlier_bounds(session.X_train, col, req.method, **kwargs)
+                    session.X_train = session.pipeline.transform_outliers(session.X_train, col, action=req.action)
+                    if session.X_valid is not None and col in session.X_valid.columns:
+                        session.X_valid = session.pipeline.transform_outliers(session.X_valid, col, action='clip') # Usually clip valid
+                    if session.X_test is not None and col in session.X_test.columns:
+                        session.X_test = session.pipeline.transform_outliers(session.X_test, col, action='clip')
+            
+            _mark_step_completed(session, "outliers")
+            return {"message": "Outliers handled on split datasets", "info": {}, "new_shape": list(session.X_train.shape)}
+        else:
+            processed, info = handle_outliers(df, req.method, req.columns, **kwargs)
+            session.processed_data = processed
+            session.outlier_config[f"{req.method}_{','.join(req.columns)}"] = info
+            safe_info = {}
+            for k, v in info.items():
+                safe_v = {k2: (v2 if isinstance(v2, (str, int, float, bool, type(None))) else str(v2)) for k2, v2 in v.items() if k2 != "outliers_mask"}
+                safe_info[k] = safe_v
+            _mark_step_completed(session, "outliers")
+            return {"message": "Outliers handled", "info": safe_info, "new_shape": list(processed.shape)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1099,77 +1263,135 @@ class SkewnessTransformRequest(BaseModel):
 def transform_skewness(req: SkewnessTransformRequest, x_session_id: str = Header(..., alias="X-Session-ID")):
     """Apply distribution transformation to reduce skewness"""
     session = get_session(x_session_id)
-    df = session.processed_data if session.processed_data is not None else session.raw_data
-    if df is None:
-        raise HTTPException(status_code=404, detail="No data loaded")
+    is_split = session.X_train is not None
+
+    if is_split:
+        df_target = session.X_train
+    else:
+        df_target = session.processed_data if session.processed_data is not None else session.raw_data
+        if df_target is None:
+            raise HTTPException(status_code=404, detail="No data loaded")
 
     from scipy import stats as scipy_stats
 
-    result_df = df.copy()
     results = {}
+    
+    def apply_transform(data_series, method, min_val):
+        if method == "Log":
+            shift = abs(min_val) + 1 if min_val <= 0 else 0
+            return np.log1p(data_series + shift)
+        elif method == "Sqrt":
+            shift = abs(min_val) if min_val < 0 else 0
+            return np.sqrt(data_series + shift)
+        elif method == "Reciprocal":
+            return 1.0 / (data_series.replace(0, np.nan).fillna(1e-6))
+        return data_series
 
-    for col in req.columns:
-        if col not in result_df.columns:
-            continue
-        if not pd.api.types.is_numeric_dtype(result_df[col]):
-            results[col] = {"error": "Not a numeric column"}
-            continue
+    # Calculate transformations and immediately apply them
+    if is_split:
+        for col in req.columns:
+            if col not in session.X_train.columns: continue
+            if not pd.api.types.is_numeric_dtype(session.X_train[col]):
+                results[col] = {"error": "Not a numeric column"}
+                continue
+            
+            col_data = session.X_train[col].dropna()
+            skew_before = float(col_data.skew())
+            min_val = col_data.min()
 
-        col_data = result_df[col].dropna()
-        skew_before = float(col_data.skew())
+            try:
+                if req.method in ["Log", "Sqrt", "Reciprocal"]:
+                    session.X_train[col] = apply_transform(session.X_train[col], req.method, min_val)
+                    if session.X_valid is not None and col in session.X_valid.columns:
+                        session.X_valid[col] = apply_transform(session.X_valid[col], req.method, min_val)
+                    if session.X_test is not None and col in session.X_test.columns:
+                        session.X_test[col] = apply_transform(session.X_test[col], req.method, min_val)
+                        
+                elif req.method == "Box-Cox":
+                    shift = abs(min_val) + 1 if min_val <= 0 else 0
+                    transformed, lmbda = scipy_stats.boxcox(col_data + shift)
+                    session.X_train.loc[session.X_train[col].notna(), col] = transformed
+                    # Use lambda on valid/test
+                    if session.X_valid is not None and col in session.X_valid.columns:
+                        session.X_valid.loc[session.X_valid[col].notna(), col] = scipy_stats.boxcox(session.X_valid.loc[session.X_valid[col].notna(), col] + shift, lmbda=lmbda)
+                    if session.X_test is not None and col in session.X_test.columns:
+                        session.X_test.loc[session.X_test[col].notna(), col] = scipy_stats.boxcox(session.X_test.loc[session.X_test[col].notna(), col] + shift, lmbda=lmbda)
+                    results[col] = {"skew_before": round(skew_before, 4), "lambda": round(float(lmbda), 4)}
 
-        try:
-            if req.method == "Log":
-                # Log(x+1) to handle zeros
-                min_val = col_data.min()
-                if min_val <= 0:
-                    shift = abs(min_val) + 1
+                elif req.method == "Yeo-Johnson":
+                    transformed, lmbda = scipy_stats.yeojohnson(col_data)
+                    session.X_train.loc[session.X_train[col].notna(), col] = transformed
+                    if session.X_valid is not None and col in session.X_valid.columns:
+                        session.X_valid.loc[session.X_valid[col].notna(), col] = scipy_stats.yeojohnson(session.X_valid.loc[session.X_valid[col].notna(), col], lmbda=lmbda)
+                    if session.X_test is not None and col in session.X_test.columns:
+                        session.X_test.loc[session.X_test[col].notna(), col] = scipy_stats.yeojohnson(session.X_test.loc[session.X_test[col].notna(), col], lmbda=lmbda)
+                    results[col] = {"skew_before": round(skew_before, 4), "lambda": round(float(lmbda), 4)}
+
+                skew_after = float(session.X_train[col].dropna().skew())
+                if col not in results: results[col] = {"skew_before": round(skew_before, 4)}
+                results[col]["skew_after"] = round(skew_after, 4)
+                results[col]["method"] = req.method
+                results[col]["improved"] = abs(skew_after) < abs(skew_before)
+
+            except Exception as e:
+                results[col] = {"error": str(e)}
+
+        session.selected_features = session.X_train.columns.tolist()
+        _mark_step_completed(session, "skewness")
+        return {
+            "message": f"Skewness transformation ({req.method}) applied on {len(results)} columns on split data",
+            "results": results,
+            "new_shape": list(session.X_train.shape),
+        }
+    else:
+        result_df = df_target.copy()
+        for col in req.columns:
+            if col not in result_df.columns: continue
+            if not pd.api.types.is_numeric_dtype(result_df[col]):
+                results[col] = {"error": "Not a numeric column"}
+                continue
+            
+            col_data = result_df[col].dropna()
+            skew_before = float(col_data.skew())
+
+            try:
+                if req.method == "Log":
+                    min_val = col_data.min()
+                    shift = abs(min_val) + 1 if min_val <= 0 else 0
                     result_df[col] = np.log1p(result_df[col] + shift)
-                else:
-                    result_df[col] = np.log1p(result_df[col])
-
-            elif req.method == "Sqrt":
-                min_val = col_data.min()
-                if min_val < 0:
-                    shift = abs(min_val)
+                elif req.method == "Sqrt":
+                    min_val = col_data.min()
+                    shift = abs(min_val) if min_val < 0 else 0
                     result_df[col] = np.sqrt(result_df[col] + shift)
-                else:
-                    result_df[col] = np.sqrt(result_df[col])
+                elif req.method == "Box-Cox":
+                    min_val = col_data.min()
+                    shift = abs(min_val) + 1 if min_val <= 0 else 0
+                    transformed, lmbda = scipy_stats.boxcox(col_data + shift)
+                    result_df.loc[result_df[col].notna(), col] = transformed
+                    results[col] = {"skew_before": round(skew_before, 4), "lambda": round(float(lmbda), 4)}
+                elif req.method == "Yeo-Johnson":
+                    transformed, lmbda = scipy_stats.yeojohnson(col_data)
+                    result_df.loc[result_df[col].notna(), col] = transformed
+                    results[col] = {"skew_before": round(skew_before, 4), "lambda": round(float(lmbda), 4)}
+                elif req.method == "Reciprocal":
+                    result_df[col] = 1.0 / (result_df[col].replace(0, np.nan).fillna(1e-6))
 
-            elif req.method == "Box-Cox":
-                # Box-Cox requires strictly positive values
-                min_val = col_data.min()
-                shift = abs(min_val) + 1 if min_val <= 0 else 0
-                transformed, lmbda = scipy_stats.boxcox(col_data + shift)
-                # Apply same transform to full column (including NaN positions)
-                result_df.loc[result_df[col].notna(), col] = transformed
-                results[col] = {"skew_before": round(skew_before, 4), "lambda": round(float(lmbda), 4)}
+                skew_after = float(result_df[col].dropna().skew())
+                if col not in results: results[col] = {"skew_before": round(skew_before, 4)}
+                results[col]["skew_after"] = round(skew_after, 4)
+                results[col]["method"] = req.method
+                results[col]["improved"] = abs(skew_after) < abs(skew_before)
 
-            elif req.method == "Yeo-Johnson":
-                transformed, lmbda = scipy_stats.yeojohnson(col_data)
-                result_df.loc[result_df[col].notna(), col] = transformed
-                results[col] = {"skew_before": round(skew_before, 4), "lambda": round(float(lmbda), 4)}
+            except Exception as e:
+                results[col] = {"error": str(e)}
 
-            elif req.method == "Reciprocal":
-                # 1/x, handle zeros by adding small constant
-                result_df[col] = 1.0 / (result_df[col].replace(0, np.nan).fillna(1e-6))
-
-            skew_after = float(result_df[col].dropna().skew())
-            if col not in results:
-                results[col] = {"skew_before": round(skew_before, 4)}
-            results[col]["skew_after"] = round(skew_after, 4)
-            results[col]["method"] = req.method
-            results[col]["improved"] = abs(skew_after) < abs(skew_before)
-
-        except Exception as e:
-            results[col] = {"error": str(e)}
-
-    session.processed_data = result_df
-    return {
-        "message": f"Skewness transformation ({req.method}) applied on {len(results)} columns",
-        "results": results,
-        "new_shape": list(result_df.shape),
-    }
+        session.processed_data = result_df
+        _mark_step_completed(session, "skewness")
+        return {
+            "message": f"Skewness transformation ({req.method}) applied on {len(results)} columns",
+            "results": results,
+            "new_shape": list(result_df.shape),
+        }
 
 
 # ==================== WoE / IV BINNING ====================
@@ -1179,24 +1401,30 @@ class BinningRequest(BaseModel):
     max_n_bins: int = 10
     min_bin_size: float = 0.05
     target_column: Optional[str] = None
+    monotonic_trend: Optional[str] = "auto"
+    new_column_name: Optional[str] = None
 
 @router.post("/binning")
 def apply_binning(req: BinningRequest, x_session_id: str = Header(..., alias="X-Session-ID")):
     """Apply Optimal Binning (WoE/IV) on specified columns"""
     session = get_session(x_session_id)
-    df = session.processed_data if session.processed_data is not None else session.raw_data
-    if df is None:
-        raise HTTPException(status_code=404, detail="No data loaded")
-
     target = req.target_column or session.target_column
-    if not target:
-        raise HTTPException(status_code=400, detail="Target column not set")
-    if target not in df.columns:
-        raise HTTPException(status_code=400, detail=f"Target column '{target}' not found in data")
+    if not target: raise HTTPException(status_code=400, detail="Target column not set")
 
-    y = df[target]
-    # Ensure binary target
-    unique_vals = y.dropna().unique()
+    is_split = session.X_train is not None
+    if is_split:
+        df_target = pd.concat([session.X_train, pd.Series(session.y_train, name=target, index=session.X_train.index)], axis=1)
+        y_fit = session.y_train
+        df_fit = session.X_train
+    else:
+        df_target = session.processed_data if session.processed_data is not None else session.raw_data
+        if df_target is None: raise HTTPException(status_code=404, detail="No data loaded")
+        y_fit = df_target[target]
+        df_fit = df_target
+
+    if target not in df_target.columns: raise HTTPException(status_code=400, detail=f"Target column '{target}' not found in data")
+
+    unique_vals = y_fit.dropna().unique()
     if len(unique_vals) != 2:
         raise HTTPException(status_code=400, detail=f"Target must be binary (0/1). Found {len(unique_vals)} unique values: {list(unique_vals[:5])}")
 
@@ -1206,50 +1434,33 @@ def apply_binning(req: BinningRequest, x_session_id: str = Header(..., alias="X-
         raise HTTPException(status_code=500, detail="optbinning not installed. Run: pip install optbinning")
 
     results = {}
-    result_df = df.copy()
     total_iv = 0
+    transformers = {}
 
     for col in req.columns:
-        if col not in df.columns or col == target:
+        if col not in df_fit.columns or col == target:
             continue
         try:
-            x = df[col].values
-            dtype = "numerical" if pd.api.types.is_numeric_dtype(df[col]) else "categorical"
+            x = df_fit[col].values
+            dtype = "numerical" if pd.api.types.is_numeric_dtype(df_fit[col]) else "categorical"
 
-            optb = OptimalBinning(
-                name=col,
-                dtype=dtype,
-                max_n_bins=req.max_n_bins,
-                min_bin_size=req.min_bin_size,
-                solver="cp",
-            )
-            optb.fit(x, y.values)
+            optb = OptimalBinning(name=col, dtype=dtype, max_n_bins=req.max_n_bins, min_bin_size=req.min_bin_size, solver="cp", monotonic_trend=req.monotonic_trend)
+            optb.fit(x, y_fit.values)
+            transformers[col] = optb
 
-            # Get binning table
             binning_table = optb.binning_table.build()
             iv = float(binning_table["IV"].iloc[-1]) if "IV" in binning_table.columns else 0.0
             total_iv += iv
 
-            # Transform to WoE values
-            result_df[col] = optb.transform(x, metric="woe")
-
-            # Store config
-            session.binning_config[col] = {"iv": iv, "n_bins": len(binning_table) - 2}
-
-            # Build safe table for JSON response
             safe_table = []
             for _, row in binning_table.iterrows():
                 safe_row = {}
                 for k, v in row.items():
                     try:
-                        if pd.isna(v):
-                            safe_row[k] = None
-                        elif isinstance(v, (int, float, np.integer, np.floating)):
-                            safe_row[k] = round(float(v), 4)
-                        else:
-                            safe_row[k] = str(v)
-                    except:
-                        safe_row[k] = str(v)
+                        if pd.isna(v): safe_row[k] = None
+                        elif isinstance(v, (int, float, np.integer, np.floating)): safe_row[k] = round(float(v), 4)
+                        else: safe_row[k] = str(v)
+                    except: safe_row[k] = str(v)
                 safe_table.append(safe_row)
 
             results[col] = {
@@ -1261,13 +1472,35 @@ def apply_binning(req: BinningRequest, x_session_id: str = Header(..., alias="X-
         except Exception as e:
             results[col] = {"error": str(e)}
 
-    session.processed_data = result_df
-
-    return {
-        "message": f"WoE/IV binning applied on {len(results)} columns. Total IV: {round(total_iv, 4)}",
-        "results": results,
-        "new_shape": list(result_df.shape),
-    }
+    if is_split:
+        for col, optb in transformers.items():
+            out_col = req.new_column_name if (req.new_column_name and len(req.columns) == 1) else f"{col}_woe"
+            session.X_train[out_col] = optb.transform(session.X_train[col].values, metric="woe")
+            if session.X_valid is not None and col in session.X_valid.columns:
+                session.X_valid[out_col] = optb.transform(session.X_valid[col].values, metric="woe")
+            if session.X_test is not None and col in session.X_test.columns:
+                session.X_test[out_col] = optb.transform(session.X_test[col].values, metric="woe")
+            session.binning_config[out_col] = {"iv": results[col].get("iv", 0), "n_bins": results[col].get("n_bins", 0)}
+        session.selected_features = session.X_train.columns.tolist()
+        _mark_step_completed(session, "binning")
+        return {
+            "message": f"WoE/IV binning applied on {len(transformers)} columns on split datasets.",
+            "results": results,
+            "new_shape": list(session.X_train.shape),
+        }
+    else:
+        result_df = df_target.copy()
+        for col, optb in transformers.items():
+            out_col = req.new_column_name if (req.new_column_name and len(req.columns) == 1) else f"{col}_woe"
+            result_df[out_col] = optb.transform(result_df[col].values, metric="woe")
+            session.binning_config[out_col] = {"iv": results[col].get("iv", 0), "n_bins": results[col].get("n_bins", 0)}
+        session.processed_data = result_df
+        _mark_step_completed(session, "binning")
+        return {
+            "message": f"WoE/IV binning applied on {len(transformers)} columns. Total IV: {round(total_iv, 4)}",
+            "results": results,
+            "new_shape": list(result_df.shape),
+        }
 
 
 # ==================== WoE ANALYSIS ====================
@@ -1356,6 +1589,7 @@ def woe_analysis(req: WoeAnalysisRequest, x_session_id: str = Header(..., alias=
     # Sort by IV descending
     sorted_results = dict(sorted(results.items(), key=lambda x: x[1].get("iv", 0), reverse=True))
 
+    _mark_step_completed(session, "woe_analysis")
     return {
         "message": f"WoE/IV analysis completed on {len(results)} features",
         "results": sorted_results,
@@ -1444,6 +1678,7 @@ def check_multicollinearity(req: MulticollinearityRequest, x_session_id: str = H
             removed_features = to_remove
 
     high_vif_count = sum(1 for v in vif_data if v["high_vif"])
+    _mark_step_completed(session, "multicollinearity")
 
     return {
         "message": f"Multicollinearity analysis: {high_vif_count} features with VIF > {req.vif_threshold}, {len(high_corr_pairs)} highly correlated pairs",
@@ -1479,8 +1714,10 @@ def balance_dataset(req: BalanceRequest, x_session_id: str = Header(..., alias="
     try:
         balanced_df, info = balance_data(df, target, method=req.method)
         session.processed_data = balanced_df
-        session.balance_info = {k: (v if isinstance(v, (str, int, float, bool, type(None))) else str(v)) for k, v in info.items()}
-        return {"message": info.get("message", "Balanced"), "info": session.balance_info, "new_shape": list(balanced_df.shape)}
+        safe_info = to_jsonable(info)
+        session.balance_info = safe_info
+        _mark_step_completed(session, "balance")
+        return {"message": safe_info.get("message", "Balanced"), "info": safe_info, "new_shape": list(balanced_df.shape)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1492,6 +1729,7 @@ class SplitRequest(BaseModel):
     test_size: float = 0.2
     valid_size: float = 0.1
     random_state: int = 42
+    stratify: bool = True
 
 @router.post("/split")
 def split_data(req: SplitRequest, x_session_id: str = Header(..., alias="X-Session-ID")):
@@ -1511,15 +1749,28 @@ def split_data(req: SplitRequest, x_session_id: str = Header(..., alias="X-Sessi
         X = df.drop(columns=[target])
         y = df[target]
 
-        # First split: train+valid vs test
-        X_temp, X_test, y_temp, y_test = train_test_split(
-            X, y, test_size=req.test_size, random_state=req.random_state, stratify=y
+        train_ratio = 1.0 - req.test_size - req.valid_size
+        if train_ratio <= 0:
+            raise HTTPException(status_code=400, detail="Invalid split ratios: train ratio must be > 0")
+
+        # First split: train vs (valid+test)
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            X,
+            y,
+            train_size=train_ratio,
+            random_state=req.random_state,
+            stratify=y if req.stratify else None,
         )
 
-        # Second split: train vs valid
-        valid_ratio = req.valid_size / (1 - req.test_size)
-        X_train, X_valid, y_train, y_valid = train_test_split(
-            X_temp, y_temp, test_size=valid_ratio, random_state=req.random_state, stratify=y_temp
+        # Second split: valid vs test from remaining subset
+        temp_total = req.valid_size + req.test_size
+        valid_ratio_in_temp = req.valid_size / temp_total if temp_total > 0 else 0.5
+        X_valid, X_test, y_valid, y_test = train_test_split(
+            X_temp,
+            y_temp,
+            train_size=valid_ratio_in_temp,
+            random_state=req.random_state,
+            stratify=y_temp if req.stratify else None,
         )
 
         session.X_train = X_train
@@ -1530,6 +1781,7 @@ def split_data(req: SplitRequest, x_session_id: str = Header(..., alias="X-Sessi
         session.y_test = y_test
         session.target_column = target
         session.selected_features = X_train.columns.tolist()
+        _mark_step_completed(session, "split")
 
         return {
             "message": "Data split successfully",
@@ -1568,7 +1820,7 @@ def scale_data(req: ScalingRequest, x_session_id: str = Header(..., alias="X-Ses
         session.X_train = session.pipeline.transform_scaling(session.X_train, columns)
         session.X_valid = session.pipeline.transform_scaling(session.X_valid, columns)
         session.X_test = session.pipeline.transform_scaling(session.X_test, columns)
-
+        _mark_step_completed(session, "scaling")
         return {"message": f"Scaling applied ({req.method}) on {len(columns)} columns", "columns_scaled": columns}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1591,9 +1843,38 @@ def calculate_importance(req: FeatureImportanceRequest, x_session_id: str = Head
 
     try:
         result = calculate_feature_importance(session.X_train, session.y_train, method=req.method, top_n=req.top_n)
+        _mark_step_completed(session, "importance")
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class SelectedFeaturesRequest(BaseModel):
+    columns: List[str]
+
+
+@router.post("/selected-features")
+def set_selected_features(req: SelectedFeaturesRequest, x_session_id: str = Header(..., alias="X-Session-ID")):
+    """Persist selected feature columns for downstream model training/prediction."""
+    session = get_session(x_session_id)
+    if session.X_train is None:
+        raise HTTPException(status_code=400, detail="Data not split yet")
+
+    available_cols = set(session.X_train.columns.tolist())
+    selected = []
+    for col in req.columns:
+        if col in available_cols and col not in selected:
+            selected.append(col)
+
+    if not selected:
+        raise HTTPException(status_code=400, detail="No valid columns provided")
+
+    session.selected_features = selected
+    return {
+        "message": f"Selected {len(selected)} features for model training",
+        "selected_features": selected,
+        "n_features": len(selected),
+    }
 
 
 @router.get("/session-info")
@@ -1605,8 +1886,14 @@ def get_session_info(x_session_id: str = Header(..., alias="X-Session-ID")):
     split_numeric_columns: List[str] = []
     split_categorical_columns: List[str] = []
     split_shape = None
+    split_sizes = None
     if session.X_train is not None:
         split_shape = list(session.X_train.shape)
+        split_sizes = {
+            "train": len(session.X_train),
+            "valid": len(session.X_valid) if session.X_valid is not None else 0,
+            "test": len(session.X_test) if session.X_test is not None else 0,
+        }
         split_feature_columns = session.X_train.columns.tolist()
         split_numeric_columns = session.X_train.select_dtypes(include=[np.number]).columns.tolist()
         split_categorical_columns = session.X_train.select_dtypes(include=["object", "category"]).columns.tolist()
@@ -1627,8 +1914,12 @@ def get_session_info(x_session_id: str = Header(..., alias="X-Session-ID")):
         "processed_shape": list(session.processed_data.shape) if session.processed_data is not None else None,
         "n_trained_models": len(session.trained_models),
         "split_shape": split_shape,
+        "split_sizes": split_sizes,
         "split_feature_columns": split_feature_columns,
         "split_numeric_columns": split_numeric_columns,
         "split_categorical_columns": split_categorical_columns,
         "split_missing": split_missing,
+        "balance_info": session.balance_info,
+        "selected_features": session.selected_features,
+        "completed_steps": sorted(list(session.completed_steps)) if hasattr(session, "completed_steps") else [],
     }

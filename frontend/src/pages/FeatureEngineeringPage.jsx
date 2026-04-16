@@ -49,9 +49,11 @@ export default function FeatureEngineeringPage() {
   const [selectedWoeFeature, setSelectedWoeFeature] = useState('');
   const [outlierResults, setOutlierResults] = useState(null);
 
-  // Step states
-  const [testSize, setTestSize] = useState(0.2);
-  const [validSize, setValidSize] = useState(0.1);
+  const [testSize, setTestSize] = useState(0.15);
+  const [validSize, setValidSize] = useState(0.15);
+  const [target, setTarget] = useState('');
+  const [randomSeed, setRandomSeed] = useState(42);
+  const [splitStratify, setSplitStratify] = useState(true);
 
   const [cleanupStrategy, setCleanupStrategy] = useState('drop_rows');
   const [cleanupCols, setCleanupCols] = useState([]);
@@ -59,6 +61,7 @@ export default function FeatureEngineeringPage() {
 
   const [missingMethod, setMissingMethod] = useState('Mean Imputation');
   const [missingCols, setMissingCols] = useState([]);
+  const [missingConstantValue, setMissingConstantValue] = useState('');
 
   const [outlierMethod, setOutlierMethod] = useState('IQR Method');
   const [outlierCols, setOutlierCols] = useState([]);
@@ -76,18 +79,44 @@ export default function FeatureEngineeringPage() {
 
   const [encMethod, setEncMethod] = useState('Label Encoding');
   const [encCols, setEncCols] = useState([]);
+  const [catSummary, setCatSummary] = useState([]);
+  const [encCol, setEncCol] = useState('');
+  const [encDropFirst, setEncDropFirst] = useState(false);
 
   const [binningCols, setBinningCols] = useState([]);
   const [binningMaxBins, setBinningMaxBins] = useState(10);
   const [binningMethod, setBinningMethod] = useState('Optimal Binning (WoE/IV)');
   const [binningPreviewCol, setBinningPreviewCol] = useState('');
+  const [binningMonotonic, setBinningMonotonic] = useState(true);
+  const [binningNewColName, setBinningNewColName] = useState('');
 
   const [scaleMethod, setScaleMethod] = useState('StandardScaler');
+  const [scaleCols, setScaleCols] = useState([]);
+  const [scaleCreateNew, setScaleCreateNew] = useState(false);
 
   const [balanceMethod, setBalanceMethod] = useState('SMOTE');
+  const [balStrategy, setBalStrategy] = useState('auto');
+  const [balDist, setBalDist] = useState(null);
+  const [balanceInfo, setBalanceInfo] = useState(null);
 
   const [impMethod, setImpMethod] = useState('Random Forest');
   const [impTopN, setImpTopN] = useState(15);
+  const [impThreshold, setImpThreshold] = useState(0.01);
+  const [selectedTrainCols, setSelectedTrainCols] = useState([]);
+
+  const normalizeImportanceResults = (payload) => {
+    if (!payload) return null;
+    if (payload.importance && typeof payload.importance === 'object' && !Array.isArray(payload.importance)) {
+      return payload.importance;
+    }
+    if (Array.isArray(payload.feature_names) && Array.isArray(payload.importance_scores)) {
+      return payload.feature_names.reduce((acc, feature, idx) => {
+        acc[feature] = Number(payload.importance_scores[idx] ?? 0);
+        return acc;
+      }, {});
+    }
+    return null;
+  };
 
   // Load session state on mount
   useEffect(() => {
@@ -110,14 +139,32 @@ export default function FeatureEngineeringPage() {
     loadDistribution(distributionColumn);
   }, [distributionColumn]);
 
+  useEffect(() => {
+    if (binningCols.length === 1) {
+      setBinningNewColName(`${binningCols[0]}_woe`);
+    } else {
+      setBinningNewColName('');
+    }
+  }, [binningCols]);
+
   const loadSessionInfo = async () => {
     try {
       const res = await dataApi.getSessionInfo();
       setSessionInfo(res.data);
-      if (res.data.has_splits) setCompletedSteps(prev => new Set([...prev, 'split']));
+      setCompletedSteps(new Set(res.data.completed_steps || []));
+      setBalanceInfo(res.data.balance_info || null);
+      const initialSelected = (res.data.selected_features && res.data.selected_features.length > 0)
+        ? res.data.selected_features
+        : (res.data.split_feature_columns || []);
+      setSelectedTrainCols(initialSelected);
+      if (res.data.target_column) {
+        setTarget(res.data.target_column);
+      }
       if (res.data.has_data) {
         const infoRes = await dataApi.getInfo();
         setDataInfo(infoRes.data);
+        const catRes = await dataApi.getCategoricalSummary(true).catch(() => ({ data: { columns: [] } }));
+        setCatSummary(catRes.data?.columns || []);
       }
     } catch { /* ignore */ }
   };
@@ -150,6 +197,17 @@ export default function FeatureEngineeringPage() {
     }
   };
 
+  useEffect(() => {
+    const selectedTarget = sessionInfo?.target_column || target || '';
+    if (selectedTarget && sessionInfo?.has_splits) {
+      dataApi.getDistribution(selectedTarget, true)
+        .then(res => setBalDist(res.data))
+        .catch(() => setBalDist(null));
+      return;
+    }
+    setBalDist(null);
+  }, [sessionInfo?.target_column, target, sessionInfo?.has_splits]);
+
   const noData = !sessionInfo?.has_data;
   const noSplits = !sessionInfo?.has_splits && !completedSteps.has('split');
 
@@ -163,6 +221,20 @@ export default function FeatureEngineeringPage() {
   const missingColsList = useSplitColumns
     ? splitMissingColsList
     : (dataInfo?.missing ? Object.keys(dataInfo.missing) : []);
+
+  const targetCol = sessionInfo?.target_column || target || '';
+  const cleanupInfo = dataInfo;
+  const cleanupCategoricalCols = cleanupInfo?.categorical_columns || [];
+  const cleanupNumericCols = cleanupInfo?.numeric_columns || [];
+  const cleanupTableCols = [...cleanupCategoricalCols, ...cleanupNumericCols];
+  const cleanupColumnCount = cleanupTableCols.length;
+  const cleanupTotalRows = cleanupInfo?.shape?.[0] || sessionInfo?.data_shape?.[0] || 1;
+  const cleanupColumnsForRemove = useSplitColumns
+    ? (sessionInfo?.split_feature_columns || []).filter((c) => c !== targetCol)
+    : cleanupTableCols.filter((c) => c !== targetCol);
+  const cleanupNumericForInvalid = useSplitColumns
+    ? splitNumericCols.filter((c) => c !== targetCol)
+    : cleanupNumericCols.filter((c) => c !== targetCol);
   const skewChartData = Object.entries(skewnessResults || {})
     .filter(([, value]) => !value.error)
     .map(([label, value]) => ({
@@ -203,6 +275,14 @@ export default function FeatureEngineeringPage() {
         woe: row.woe == null ? null : Number(row.woe),
       }))
     : [];
+  const importanceRankedRows = Object.entries(importanceResults || {})
+    .map(([feature, score]) => ({
+      feature,
+      score: typeof score === 'number' ? score : Number(score) || 0,
+    }))
+    .sort((a, b) => b.score - a.score);
+  const importanceMaxScore = Math.max(1e-9, ...importanceRankedRows.map((row) => row.score));
+  const selectedByThreshold = importanceRankedRows.filter((row) => row.score >= impThreshold).map((row) => row.feature);
 
   return (
     <div>
@@ -244,26 +324,142 @@ export default function FeatureEngineeringPage() {
           {/* Step 1: Split */}
           {key === 'split' && (
             <>
-              <div className="flex gap-md" style={{ flexWrap: 'wrap' }}>
-                <div className="form-group" style={{ flex: 1, minWidth: 150 }}>
-                  <label className="form-label">Test Size</label>
-                  <input className="form-input" type="number" min="0.05" max="0.5" step="0.05"
-                    value={testSize} onChange={e => setTestSize(+e.target.value)} disabled={viewOnly} />
+              <div className="cleanup-callout cleanup-callout-info" style={{ marginBottom: 16 }}>
+                <div className="cleanup-callout-icon">💡</div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>Important: All preprocessing steps (missing values, outliers, encoding...) will be fitted on the Train set, then transformed to the Valid and Test sets to prevent data leakage.</div>
+              </div>
+
+              <div className="cleanup-grid">
+                {/* LEFT PANEL: Split Configuration */}
+                <div className="cleanup-panel">
+                  <div className="cleanup-panel-header">
+                    <span className="cleanup-panel-icon">📊</span>
+                    <span className="cleanup-panel-title">Split Configuration</span>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Choose target column:</label>
+                    <select className="form-select" value={target} onChange={(e) => setTarget(e.target.value)} disabled={viewOnly}>
+                      <option value="">Select target...</option>
+                      {dataInfo?.columns?.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+
+                  <button 
+                    className="btn btn-secondary btn-sm" 
+                    onClick={() => run('setTarget', () => dataApi.setTarget(target))} 
+                    disabled={!target || viewOnly}
+                    style={{ width: '100%', marginBottom: 16, justifyContent: 'center' }}
+                  >
+                    💾 Save Target
+                  </button>
+
+                  <div className="flex gap-md" style={{ marginBottom: 12 }}>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="form-label">Train Ratio (%): {((1 - testSize - validSize) * 100).toFixed(0)}</label>
+                      <input className="form-input" type="range" min="50" max="90" step="1" 
+                        value={((1 - testSize - validSize) * 100).toFixed(0)} 
+                        onChange={e => {
+                          const tr = +e.target.value;
+                          const remaining = 100 - tr;
+                          const newV = Math.floor(remaining / 2) / 100;
+                          const newT = (remaining - Math.floor(remaining / 2)) / 100;
+                          setValidSize(newV);
+                          setTestSize(newT);
+                        }} disabled={viewOnly} style={{ accentColor: '#3b82f6' }} />
+                    </div>
+                    <div className="form-group" style={{ flex: 1 }}>
+                      <label className="form-label">Valid Ratio (%): {(validSize * 100).toFixed(0)}</label>
+                      <input className="form-input" type="range" min="5" max="30" step="1" 
+                        value={(validSize * 100).toFixed(0)} 
+                        onChange={e => {
+                          const val = +e.target.value;
+                          const currentTrPercentage = ((1 - testSize - validSize) * 100).toFixed(0);
+                          const remaining = 100 - currentTrPercentage - val;
+                          if (remaining >= 5) { // test size at least 5%
+                            setValidSize(val / 100);
+                            setTestSize(remaining / 100);
+                          }
+                        }} disabled={viewOnly} style={{ accentColor: '#ec4899' }} />
+                    </div>
+                  </div>
+
+                  <div className="cleanup-badge" style={{ marginBottom: 16, justifyContent: 'center' }}>
+                    <span className="cleanup-badge-dot" />
+                    Split Ratio: Train {((1 - testSize - validSize) * 100).toFixed(0)}% | Valid {(validSize * 100).toFixed(0)}% | Test {(testSize * 100).toFixed(0)}%
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Random Seed:</label>
+                    <input className="form-input" type="number" 
+                      value={randomSeed} onChange={e => setRandomSeed(+e.target.value)} disabled={viewOnly} />
+                  </div>
+
+                  <div className="form-group" style={{ marginTop: 8 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 600 }}>
+                      <input
+                        type="checkbox"
+                        checked={splitStratify}
+                        onChange={(e) => setSplitStratify(e.target.checked)}
+                        disabled={viewOnly}
+                        style={{ accentColor: '#ef4444' }}
+                      />
+                      🎯 Stratify (keep target ratio)
+                    </label>
+                  </div>
+
+                  <button className="btn btn-primary btn-sm" disabled={viewOnly || loading || !target}
+                    onClick={() => run('split', () => dataApi.split({ target_column: target, test_size: testSize, valid_size: validSize, random_state: randomSeed, stratify: splitStratify }))}
+                    style={{ width: '100%', justifyContent: 'center', marginTop: 8 }}>
+                    ✂️ Split Data
+                  </button>
                 </div>
-                <div className="form-group" style={{ flex: 1, minWidth: 150 }}>
-                  <label className="form-label">Validation Size</label>
-                  <input className="form-input" type="number" min="0.05" max="0.3" step="0.05"
-                    value={validSize} onChange={e => setValidSize(+e.target.value)} disabled={viewOnly} />
-                </div>
-                <div className="form-group" style={{ flex: 1, minWidth: 150 }}>
-                  <label className="form-label">Train Size (auto)</label>
-                  <input className="form-input" type="text" disabled value={`${((1 - testSize - validSize) * 100).toFixed(0)}%`} />
+
+                {/* RIGHT PANEL: Split Status */}
+                <div className="cleanup-panel">
+                  <div className="cleanup-panel-header">
+                    <span className="cleanup-panel-icon">📈</span>
+                    <span className="cleanup-panel-title">Split Status</span>
+                  </div>
+
+                  {completedSteps.has('split') ? (
+                    <div className="cleanup-callout cleanup-callout-success" style={{ marginBottom: 16 }}>
+                      <div className="cleanup-callout-icon">✅</div>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 700 }}>Data has been split</div>
+                        <ul style={{ margin: '6px 0 0 16px', fontSize: 13, lineHeight: 1.7 }}>
+                          <li>Train: {sessionInfo?.split_sizes?.train ?? 0} rows</li>
+                          <li>Valid: {sessionInfo?.split_sizes?.valid ?? 0} rows</li>
+                          <li>Test: {sessionInfo?.split_sizes?.test ?? 0} rows</li>
+                        </ul>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="cleanup-callout cleanup-callout-warning" style={{ marginBottom: 16 }}>
+                      <div className="cleanup-callout-icon">⏳</div>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 700 }}>Not Split Yet</div>
+                        <div style={{ fontSize: 12, marginTop: 4 }}>Current data: {dataInfo?.shape?.[0] || 'Unknown'} rows</div>
+                        <div style={{ fontSize: 12, marginTop: 4 }}>Configure the split on the left side and press Split Data.</div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="cleanup-callout cleanup-callout-info" style={{ marginTop: 8, background: 'var(--surface)' }}>
+                    <div className="cleanup-callout-icon">📗</div>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Benefits of splitting:</div>
+                      <ul style={{ margin: '0 0 0 16px', fontSize: 12, lineHeight: 1.7, color: 'var(--text-secondary)' }}>
+                        <li><strong>Train:</strong> Used to fit models and calculate statistics</li>
+                        <li><strong>Valid:</strong> Evaluate model during training phase</li>
+                        <li><strong>Test:</strong> Final evaluation, never seen by the model</li>
+                        <li><strong>Avoid overfitting:</strong> Model has never seen Valid/Test data during training</li>
+                        <li><strong>Avoid data leakage:</strong> Statistics strictly drawn from Train only</li>
+                      </ul>
+                    </div>
+                  </div>
                 </div>
               </div>
-              <button className="btn btn-primary btn-sm" disabled={viewOnly || loading}
-                onClick={() => run('split', () => dataApi.split({ test_size: testSize, valid_size: validSize }))}>
-                Split Data
-              </button>
             </>
           )}
 
@@ -274,13 +470,13 @@ export default function FeatureEngineeringPage() {
               <div className="cleanup-panel">
                 <div className="cleanup-panel-header">
                   <span className="cleanup-panel-icon">🔍</span>
-                  <span className="cleanup-panel-title">Remove Categorical Variables</span>
+                  <span className="cleanup-panel-title">Remove Identifier Variables</span>
                 </div>
 
                 <div className="cleanup-callout cleanup-callout-info">
                   <div className="cleanup-callout-icon">💡</div>
                   <div>
-                    <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Categorical variables can't be used to predict, should be removed from model:</p>
+                    <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Identifier variables can't be used to predict, should be removed from model:</p>
                     <ul style={{ margin: '6px 0 0 16px', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
                       <li>Customer ID (customer_id, user_id)</li>
                       <li>Contract ID (contract_id, loan_id)</li>
@@ -292,7 +488,7 @@ export default function FeatureEngineeringPage() {
 
                 <div className="cleanup-badge">
                   <span className="cleanup-badge-dot" />
-                  Dataset currently has {(numericCols.length + categoricalCols.length) || '—'} columns
+                  Dataset currently has {cleanupColumnCount || '—'} columns
                 </div>
 
                 {/* Columns info table */}
@@ -300,17 +496,16 @@ export default function FeatureEngineeringPage() {
                   <table>
                     <thead>
                       <tr>
-                        <th>Cột</th>
+                        <th>Column</th>
                         <th style={{ textAlign: 'right' }}>Number Of Unique Values</th>
                         <th style={{ textAlign: 'right' }}>Unique Rate (%)</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {[...categoricalCols, ...numericCols].map((col) => {
-                        const totalRows = sessionInfo?.split_shape?.[0] || sessionInfo?.data_shape?.[0] || 1;
-                        const uniqueCount = dataInfo?.unique_counts?.[col] ?? '—';
+                      {cleanupTableCols.map((col) => {
+                        const uniqueCount = cleanupInfo?.unique_counts?.[col] ?? '—';
                         const uniquePct = typeof uniqueCount === 'number'
-                          ? ((uniqueCount / totalRows) * 100).toFixed(1)
+                          ? ((uniqueCount / cleanupTotalRows) * 100).toFixed(1)
                           : '—';
                         return (
                           <tr key={col}>
@@ -326,7 +521,7 @@ export default function FeatureEngineeringPage() {
 
                 <ColumnMultiSelector
                   label="Choose columns to remove:"
-                  columns={[...categoricalCols, ...numericCols]}
+                  columns={cleanupColumnsForRemove}
                   values={cleanupCols}
                   onChange={setCleanupCols}
                   disabled={viewOnly || noSplits}
@@ -338,9 +533,9 @@ export default function FeatureEngineeringPage() {
                   className="btn btn-danger btn-sm"
                   style={{ width: '100%', marginTop: 8, justifyContent: 'center', gap: 6 }}
                   disabled={viewOnly || loading || noSplits || cleanupCols.length === 0}
-                  onClick={() => run('cleanup', () => dataApi.removeCategorical(false, true))}
+                  onClick={() => run('cleanup', () => dataApi.removeCategorical({ columns: cleanupCols, processed: false, apply_on_splits: true }))}
                 >
-                  🗑️ Remove Categorical Columns
+                  🗑️ Remove Selected Columns
                 </button>
               </div>
 
@@ -366,12 +561,12 @@ export default function FeatureEngineeringPage() {
 
                 <ColumnMultiSelector
                   label="Columns (optional):"
-                  columns={numericCols}
+                  columns={cleanupNumericForInvalid}
                   values={invalidCols}
                   onChange={setInvalidCols}
                   disabled={viewOnly || noSplits}
                   placeholder="Choose options"
-                  showSelectAll={numericCols.length > 0}
+                  showSelectAll={cleanupNumericForInvalid.length > 0}
                 />
 
                 <div className="form-group" style={{ marginTop: 4 }}>
@@ -411,6 +606,19 @@ export default function FeatureEngineeringPage() {
                     )}
                   </select>
                 </div>
+                {missingMethod === 'Constant Value' && (
+                  <div className="form-group" style={{ flex: 1, minWidth: 200 }}>
+                    <label className="form-label">Constant Value</label>
+                    <input
+                      className="form-input"
+                      type="number"
+                      value={missingConstantValue}
+                      onChange={(e) => setMissingConstantValue(e.target.value)}
+                      placeholder="Enter value (e.g. 0)"
+                      disabled={viewOnly || noSplits}
+                    />
+                  </div>
+                )}
                 <ColumnMultiSelector
                   label="Columns"
                   columns={missingColsList}
@@ -421,10 +629,11 @@ export default function FeatureEngineeringPage() {
                   showSelectAll={missingColsList.length > 0}
                 />
               </div>
-              <button className="btn btn-primary btn-sm" disabled={viewOnly || loading || noSplits || missingCols.length === 0}
+              <button className="btn btn-primary btn-sm" disabled={viewOnly || loading || noSplits || missingCols.length === 0 || (missingMethod === 'Constant Value' && missingConstantValue === '')}
                 onClick={() => run('missing', () => dataApi.handleMissing({
                   method: missingMethod,
                   columns: missingCols,
+                  constant_value: missingMethod === 'Constant Value' ? Number(missingConstantValue) : undefined,
                 }))}>
                 Handle Missing Values
               </button>
@@ -801,79 +1010,141 @@ export default function FeatureEngineeringPage() {
 
           {/* Step 6: Encoding */}
           {key === 'encoding' && (() => {
-            const ENC_DESC = {
-              'One-Hot Encoding': 'Creates binary columns per category. Best for nominal features with few unique values.',
-              'Label Encoding': 'Maps each category to an integer. Simple but implies ordinal relationship.',
-              'Target Encoding': 'Replaces categories with mean of target. Powerful but risk of overfitting.',
-              'Ordinal Encoding': 'Maps categories to ordered integers. Use when categories have natural order.',
-              'Frequency Encoding': 'Replaces categories with their frequency. Preserves information about rarity.',
-            };
+            const selStats = catSummary.find(c => c.column_name === encCol) || null;
+            const uniqueVals = selStats?.unique_values || 0;
+            
+            let recMethod = 'One-Hot Encoding';
+            let recReason = 'Default';
+            if (uniqueVals === 2) {
+              recMethod = 'Label Encoding';
+              recReason = `Binary variable (${uniqueVals} categories) - Label Encoding is enough.`;
+            } else if (uniqueVals > 2 && uniqueVals <= 10) {
+              recMethod = 'One-Hot Encoding';
+              recReason = `Low cardinality (${uniqueVals} categories) - One-Hot reduces the assumption of order.`;
+            } else if (uniqueVals > 10) {
+              recMethod = 'Frequency Encoding';
+              recReason = `High cardinality (${uniqueVals} categories) - Frequency Encoding helps reduce data dimensionality.`;
+            }
+
             return (
             <>
-              <div className="cleanup-grid">
-                <div className="cleanup-panel">
-                  <div className="cleanup-panel-header">
-                    <span className="cleanup-panel-icon">⚙️</span>
-                    <span className="cleanup-panel-title">Encoding Configuration</span>
+              {categoricalCols.length > 0 && (
+                <div className="cleanup-callout cleanup-callout-warning" style={{ marginBottom: 16 }}>
+                  <div className="cleanup-callout-icon">⚠️</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                    There are {categoricalCols.length} categorical variables that need to be encoded
                   </div>
-
-                  <div className="form-group">
-                    <label className="form-label">Method</label>
-                    <select className="form-select" value={encMethod} onChange={e => setEncMethod(e.target.value)} disabled={viewOnly}>
-                      {['One-Hot Encoding', 'Label Encoding', 'Target Encoding', 'Ordinal Encoding', 'Frequency Encoding'].map(m =>
-                        <option key={m} value={m}>{m}</option>
-                      )}
-                    </select>
-                  </div>
-
-                  <div className="cleanup-callout cleanup-callout-info" style={{ marginBottom: 12 }}>
-                    <div className="cleanup-callout-icon">📝</div>
-                    <div style={{ fontSize: 12 }}>{ENC_DESC[encMethod] || ''}</div>
-                  </div>
-
-                  <ColumnMultiSelector
-                    label="Columns to encode"
-                    columns={categoricalCols}
-                    values={encCols}
-                    onChange={setEncCols}
-                    disabled={viewOnly}
-                    placeholder="Choose categorical columns"
-                    showSelectAll={categoricalCols.length > 0}
-                  />
-
-                  <button
-                    className="btn btn-primary btn-sm"
-                    style={{ width: '100%', marginTop: 4, justifyContent: 'center' }}
-                    disabled={viewOnly || loading || encCols.length === 0}
-                    onClick={() => run('encoding', () => dataApi.encode({ method: encMethod, columns: encCols }))}
-                  >
-                    ✅ Apply Encoding
-                  </button>
                 </div>
+              )}
 
+              <div className="cleanup-grid">
+                {/* LEFT PANEL: Danh sách biến phân loại */}
                 <div className="cleanup-panel">
                   <div className="cleanup-panel-header">
-                    <span className="cleanup-panel-icon">📊</span>
-                    <span className="cleanup-panel-title">Encoding Guide</span>
+                    <span className="cleanup-panel-icon">📝</span>
+                    <span className="cleanup-panel-title">Categorical Variables List</span>
                   </div>
-
                   <div className="table-container">
                     <table>
-                      <thead><tr><th>Method</th><th>Best For</th><th>Pros</th></tr></thead>
+                      <thead>
+                        <tr>
+                          <th>Column</th>
+                          <th style={{ textAlign: 'right' }}>Num. of unique values</th>
+                          <th>Most common values</th>
+                        </tr>
+                      </thead>
                       <tbody>
-                        <tr><td style={{ fontWeight: 600 }}>One-Hot</td><td>Nominal, few categories</td><td>No ordinal assumption</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>Label</td><td>Ordinal features</td><td>Simple, compact</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>Target</td><td>High cardinality</td><td>Captures target relationship</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>Ordinal</td><td>Natural ordering</td><td>Preserves order</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>Frequency</td><td>Any categorical</td><td>Handles rare categories</td></tr>
+                        {categoricalCols.map(colName => {
+                          const stats = catSummary.find(c => c.column_name === colName) || {};
+                          return (
+                            <tr key={colName}>
+                              <td style={{ fontWeight: 600 }}>{colName}</td>
+                              <td style={{ textAlign: 'right' }}>{stats.unique_values ?? '—'}</td>
+                              <td>{stats.most_common ?? '—'}</td>
+                            </tr>
+                          );
+                        })}
+                        {categoricalCols.length === 0 && (
+                          <tr><td colSpan="3" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>No categorical variables left to process.</td></tr>
+                        )}
                       </tbody>
                     </table>
                   </div>
+                </div>
 
-                  <div className="cleanup-callout cleanup-callout-warning" style={{ marginTop: 12 }}>
-                    <div className="cleanup-callout-icon">⚠️</div>
-                    <div style={{ fontSize: 12 }}>Categorical columns remaining: <strong>{categoricalCols.length}</strong></div>
+                {/* RIGHT PANEL: Cấu hình mã hóa */}
+                <div className="cleanup-panel">
+                  <div className="cleanup-panel-header">
+                    <span className="cleanup-panel-icon">⚙️</span>
+                    <span className="cleanup-panel-title">Configuration for Encoding Each Column</span>
                   </div>
+
+                  <div className="form-group" style={{ marginBottom: 12 }}>
+                    <label className="form-label">Select column to encode:</label>
+                    <select className="form-select" value={encCol} disabled={viewOnly || categoricalCols.length === 0} onChange={e => {
+                      const newCol = e.target.value;
+                      setEncCol(newCol);
+                      // Auto apply recommendation
+                      const stats = catSummary.find(c => c.column_name === newCol);
+                      const uVals = stats?.unique_values || 0;
+                      if (uVals === 2) setEncMethod('Label Encoding');
+                      else if (uVals > 2 && uVals <= 10) setEncMethod('One-Hot Encoding');
+                      else if (uVals > 10) setEncMethod('Frequency Encoding');
+                    }}>
+                      <option value="">-- Choosing column --</option>
+                      {categoricalCols.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+
+                  {encCol && (
+                    <>
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 2 }}>Number of unique values</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 16 }}>{uniqueVals}</div>
+
+                      <div className="cleanup-callout cleanup-callout-info" style={{ marginBottom: 16, backgroundColor: 'rgba(59, 130, 246, 0.1)' }}>
+                        <div className="cleanup-callout-icon">💡</div>
+                        <div style={{ fontSize: 12 }}>
+                          <strong>Suggestion: {recMethod}</strong><br/>
+                          <span style={{ color: 'var(--text-secondary)' }}>{recReason}</span>
+                        </div>
+                      </div>
+
+                      <div className="form-group" style={{ marginBottom: 16 }}>
+                        <label className="form-label">Encoding method:</label>
+                        <select className="form-select" value={encMethod} onChange={e => setEncMethod(e.target.value)} disabled={viewOnly}>
+                          {['One-Hot Encoding', 'Label Encoding', 'Target Encoding', 'Ordinal Encoding', 'Frequency Encoding'].map(m =>
+                            <option key={m} value={m}>{m}</option>
+                          )}
+                        </select>
+                      </div>
+
+                      {encMethod === 'One-Hot Encoding' && (
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, paddingBottom: 16, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={encDropFirst} onChange={e => setEncDropFirst(e.target.checked)} disabled={viewOnly} />
+                          Drop first dummy (avoid multicollinearity)
+                        </label>
+                      )}
+
+                      <button
+                        className="btn btn-primary btn-sm"
+                        style={{ width: '100%', justifyContent: 'center' }}
+                        disabled={viewOnly || loading || !encCol}
+                        onClick={async () => {
+                          const payload = { method: encMethod, columns: [encCol], drop_first: encDropFirst };
+                          await run('encoding', () => dataApi.encode(payload));
+                          setEncCol(''); // Reset sau khi xử lý thành công
+                        }}
+                      >
+                        ➕ Add Setup
+                      </button>
+                    </>
+                  )}
+                  
+                  {!encCol && categoricalCols.length > 0 && (
+                    <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: 13, marginTop: 32 }}>
+                      Please select a column to configure.
+                    </div>
+                  )}
                 </div>
               </div>
             </>
@@ -935,6 +1206,18 @@ export default function FeatureEngineeringPage() {
                     showSelectAll={numericCols.length > 0}
                   />
 
+                  <div className="form-group" style={{ marginTop: 12 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
+                      <input type="checkbox" checked={binningMonotonic} onChange={e => setBinningMonotonic(e.target.checked)} disabled={viewOnly} style={{ accentColor: 'var(--error)' }} />
+                      📈 Monotonic (Increasing/decreasing bad rate)
+                    </label>
+                  </div>
+
+                  <div className="form-group" style={{ marginTop: 16 }}>
+                    <label className="form-label" style={{ fontSize: 13 }}>New column name:</label>
+                    <input className="form-input" style={{ width: '100%', marginBottom: 12 }} type="text" value={binningNewColName} onChange={e => setBinningNewColName(e.target.value)} disabled={viewOnly || binningCols.length !== 1} placeholder={binningCols.length > 1 ? 'Only support new column name when selecting 1 column' : 'Example: age_woe'} />
+                  </div>
+
                   <button
                     className="btn btn-primary btn-sm"
                     style={{ width: '100%', marginTop: 4, justifyContent: 'center' }}
@@ -943,6 +1226,8 @@ export default function FeatureEngineeringPage() {
                       const data = await run('binning', () => dataApi.binning({
                         columns: binningCols,
                         max_n_bins: binningMaxBins,
+                        monotonic_trend: binningMonotonic ? "auto_asc_desc" : "auto",
+                        new_column_name: (binningNewColName && binningCols.length === 1) ? binningNewColName : null
                       }));
                       if (data?.results) {
                         setBinningResults(data.results);
@@ -951,7 +1236,7 @@ export default function FeatureEngineeringPage() {
                       if (bCol) await loadDistribution(bCol);
                     }}
                   >
-                    ✅ Apply Binning
+                    🔄 Apply Binning
                   </button>
                 </div>
 
@@ -1244,14 +1529,20 @@ export default function FeatureEngineeringPage() {
 
           {/* Step 10: Scaling */}
           {key === 'scaling' && (() => {
-            const SCALE_DESC = {
-              'StandardScaler': 'Centers to mean=0, std=1. Best for normally distributed features.',
-              'MinMaxScaler': 'Scales to [0, 1] range. Sensitive to outliers.',
-              'RobustScaler': 'Uses median and IQR. Robust to outliers.',
-              'MaxAbsScaler': 'Scales by maximum absolute value. Preserves sparsity.',
-            };
             return (
             <>
+              <div className="cleanup-callout cleanup-callout-info" style={{ marginBottom: 16 }}>
+                <div className="cleanup-callout-icon">💡</div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>Scaling standardizes variables onto a common scale, critical for:</div>
+                <ul style={{ margin: '8px 0 0 24px', fontSize: 12, padding: 0 }}>
+                  <li>Linear Regression, Logistic Regression</li>
+                  <li>Neural Networks, Deep Learning</li>
+                  <li>K-Nearest Neighbors (KNN)</li>
+                  <li>Support Vector Machines (SVM)</li>
+                  <li>Gradient Descent optimization</li>
+                </ul>
+              </div>
+
               <div className="cleanup-grid">
                 <div className="cleanup-panel">
                   <div className="cleanup-panel-header">
@@ -1259,8 +1550,8 @@ export default function FeatureEngineeringPage() {
                     <span className="cleanup-panel-title">Scaling Configuration</span>
                   </div>
 
-                  <div className="form-group">
-                    <label className="form-label">Method</label>
+                  <div className="form-group" style={{ marginBottom: 12 }}>
+                    <label className="form-label">Scaling method:</label>
                     <select className="form-select" value={scaleMethod} onChange={e => setScaleMethod(e.target.value)} disabled={viewOnly}>
                       {['StandardScaler', 'MinMaxScaler', 'RobustScaler', 'MaxAbsScaler'].map(m =>
                         <option key={m} value={m}>{m}</option>
@@ -1268,40 +1559,53 @@ export default function FeatureEngineeringPage() {
                     </select>
                   </div>
 
-                  <div className="cleanup-callout cleanup-callout-info" style={{ marginBottom: 12 }}>
-                    <div className="cleanup-callout-icon">📝</div>
-                    <div style={{ fontSize: 12 }}>{SCALE_DESC[scaleMethod] || ''}</div>
+                  <ColumnMultiSelector
+                    label="Select columns to scale:"
+                    columns={numericCols}
+                    values={scaleCols}
+                    onChange={setScaleCols}
+                    disabled={viewOnly}
+                    placeholder="Choose options"
+                    showSelectAll={numericCols.length > 0}
+                  />
+
+                  <div className="form-group" style={{ marginTop: 16, marginBottom: 12 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={scaleCreateNew} onChange={e => setScaleCreateNew(e.target.checked)} disabled={viewOnly} />
+                      Create new columns (keep original columns)
+                    </label>
                   </div>
 
                   <button
                     className="btn btn-primary btn-sm"
                     style={{ width: '100%', justifyContent: 'center' }}
-                    disabled={viewOnly || loading || noSplits}
-                    onClick={() => run('scaling', () => dataApi.scale({ method: scaleMethod }))}
+                    disabled={viewOnly || loading || noSplits || scaleCols.length === 0}
+                    onClick={() => {
+                      // Note: create_new_columns is not natively supported in the basic pipeline yet, 
+                      // but we pass it anyway to be handled by future backend updates.
+                      run('scaling', () => dataApi.scale({ method: scaleMethod, columns: scaleCols, create_new_columns: scaleCreateNew }));
+                    }}
                   >
-                    ✅ Scale Features
+                    🔄 Execute Scaling
                   </button>
                 </div>
 
                 <div className="cleanup-panel">
                   <div className="cleanup-panel-header">
                     <span className="cleanup-panel-icon">📊</span>
-                    <span className="cleanup-panel-title">Scaling Guide</span>
+                    <span className="cleanup-panel-title">Scaling Information</span>
                   </div>
 
-                  <div className="table-container">
-                    <table>
-                      <thead><tr><th>Scaler</th><th>Formula</th><th>Best When</th></tr></thead>
-                      <tbody>
-                        <tr><td style={{ fontWeight: 600 }}>Standard</td><td>(x - μ) / σ</td><td>Normal distribution</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>MinMax</td><td>(x - min) / (max - min)</td><td>Bounded range needed</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>Robust</td><td>(x - median) / IQR</td><td>Outliers present</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>MaxAbs</td><td>x / |max|</td><td>Sparse data</td></tr>
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <div className="cleanup-callout cleanup-callout-warning" style={{ marginTop: 12 }}>
+                  <div style={{ fontSize: 13, marginBottom: 8, fontWeight: 600, color: 'var(--success)' }}>Scaling Methods Summary:</div>
+                  <ul style={{ margin: '0 0 16px 24px', fontSize: 13, padding: 0, lineHeight: '1.6' }}>
+                    <li><strong>StandardScaler:</strong> Mean=0, Std=1</li>
+                    <li><strong>MinMaxScaler:</strong> Scale to [0, 1]</li>
+                    <li><strong>RobustScaler:</strong> Uses median & IQR</li>
+                    <li><strong>MaxAbsScaler:</strong> Scale to [-1, 1]</li>
+                    <li><strong>Normalizer:</strong> Normalize per sample</li>
+                  </ul>
+                  
+                  <div className="cleanup-callout cleanup-callout-warning">
                     <div className="cleanup-callout-icon">⚠️</div>
                     <div style={{ fontSize: 12 }}>Scaler is fitted on train set only and applied to validation/test to prevent data leakage.</div>
                   </div>
@@ -1313,42 +1617,100 @@ export default function FeatureEngineeringPage() {
 
           {/* Step 11: Balance */}
           {key === 'balance' && (() => {
-            const BAL_DESC = {
-              'SMOTE': 'Synthetic Minority Over-sampling. Creates synthetic samples by interpolating between nearest neighbors.',
-              'ADASYN': 'Adaptive Synthetic. Like SMOTE but focuses on harder-to-learn samples.',
-              'SMOTE-ENN': 'SMOTE + Edited Nearest Neighbors. Over-samples then cleans noisy samples.',
-              'SMOTE-Tomek': 'SMOTE + Tomek Links. Over-samples then removes borderline samples.',
-              'Random Over-sampling': 'Duplicates random minority samples. Simple but risk of overfitting.',
-              'Random Under-sampling': 'Removes random majority samples. Fast but loses information.',
+            let classesCount = 0;
+            let ratio = 0;
+            let classDetails = [];
+            const beforeDist = balanceInfo?.original_distribution || null;
+            const afterDist = balanceInfo?.balanced_distribution || null;
+            const distToRows = (dist) => {
+              if (!dist || typeof dist !== 'object') return [];
+              const total = Object.values(dist).reduce((sum, value) => sum + Number(value || 0), 0);
+              return Object.entries(dist)
+                .map(([label, count]) => ({
+                  label,
+                  count: Number(count || 0),
+                  pct: total > 0 ? ((Number(count || 0) / total) * 100).toFixed(1) : '0.0',
+                }))
+                .sort((a, b) => String(a.label).localeCompare(String(b.label)));
             };
+            const beforeRows = distToRows(beforeDist);
+            const afterRows = distToRows(afterDist);
+            
+            if (balDist?.distribution?.counts && balDist?.distribution?.labels) {
+              const counts = balDist.distribution.counts;
+              const labels = balDist.distribution.labels;
+              classesCount = labels.length;
+              if (classesCount >= 2) {
+                const sortedIdx = counts.map((v, i) => i).sort((a, b) => counts[b] - counts[a]);
+                if (counts[sortedIdx[1]] > 0) {
+                  ratio = counts[sortedIdx[0]] / counts[sortedIdx[1]];
+                }
+                const total = counts.reduce((sum, v) => sum + v, 0);
+                classDetails = labels.map((l, i) => ({
+                  label: l,
+                  count: counts[i],
+                  pct: total > 0 ? ((counts[i] / total) * 100).toFixed(1) : 0
+                })).sort((a, b) => a.label - b.label); // simplified sort if labels are 0,1
+              }
+            } else if (balDist?.distribution?.histogram_bins) {
+              // fallback if it was identified as continuous
+              const bins = balDist.summary.unique_values;
+              classesCount = bins || 2;
+            }
+
             return (
             <>
               <div className="cleanup-grid">
                 <div className="cleanup-panel">
                   <div className="cleanup-panel-header">
                     <span className="cleanup-panel-icon">⚙️</span>
-                    <span className="cleanup-panel-title">Class Balancing</span>
+                    <span className="cleanup-panel-title">Balancing Configuration</span>
                   </div>
 
-                  <div className="form-group">
-                    <label className="form-label">Method</label>
-                    <select className="form-select" value={balanceMethod} onChange={e => setBalanceMethod(e.target.value)} disabled={viewOnly}>
+                  {!targetCol && (
+                    <div className="cleanup-callout cleanup-callout-warning" style={{ marginBottom: 16 }}>
+                      <div className="cleanup-callout-icon">⚠️</div>
+                      <div style={{ fontSize: 12, fontWeight: 600 }}>Target column not selected. Please select a target in the Split Train/Valid/Test section.</div>
+                    </div>
+                  )}
+
+                  <div className="form-group" style={{ marginBottom: 12 }}>
+                    <label className="form-label">Target column (from setup):</label>
+                    <input
+                      className="form-input"
+                      type="text"
+                      value={targetCol || 'Not selected'}
+                      readOnly
+                    />
+                  </div>
+
+                  <div className="form-group" style={{ marginBottom: 12 }}>
+                    <label className="form-label">Method:</label>
+                    <select className="form-select" value={balanceMethod} onChange={e => setBalanceMethod(e.target.value)} disabled={viewOnly || !targetCol}>
                       {['SMOTE', 'ADASYN', 'SMOTE-ENN', 'SMOTE-Tomek', 'Random Over-sampling', 'Random Under-sampling'].map(m =>
                         <option key={m} value={m}>{m}</option>
                       )}
                     </select>
                   </div>
 
-                  <div className="cleanup-callout cleanup-callout-info" style={{ marginBottom: 12 }}>
-                    <div className="cleanup-callout-icon">📝</div>
-                    <div style={{ fontSize: 12 }}>{BAL_DESC[balanceMethod] || ''}</div>
+                  <div className="form-group" style={{ marginBottom: 16 }}>
+                    <label className="form-label">Sampling strategy:</label>
+                    <select className="form-select" value={balStrategy} onChange={e => setBalStrategy(e.target.value)} disabled={viewOnly || !targetCol}>
+                      <option value="auto">auto</option>
+                      <option value="minority">minority</option>
+                      <option value="not minority">not minority</option>
+                      <option value="all">all</option>
+                    </select>
                   </div>
 
                   <button
                     className="btn btn-primary btn-sm"
                     style={{ width: '100%', justifyContent: 'center' }}
-                    disabled={viewOnly || loading || noSplits}
-                    onClick={() => run('balance', () => dataApi.balance({ method: balanceMethod }))}
+                    disabled={viewOnly || loading || noSplits || !targetCol}
+                    onClick={async () => {
+                      const data = await run('balance', () => dataApi.balance({ method: balanceMethod, sampling_strategy: balStrategy, target_column: targetCol }));
+                      if (data?.info) setBalanceInfo(data.info);
+                    }}
                   >
                     ✅ Balance Classes
                   </button>
@@ -1357,27 +1719,80 @@ export default function FeatureEngineeringPage() {
                 <div className="cleanup-panel">
                   <div className="cleanup-panel-header">
                     <span className="cleanup-panel-icon">📊</span>
-                    <span className="cleanup-panel-title">Balancing Guide</span>
+                    <span className="cleanup-panel-title">Class Distribution</span>
                   </div>
 
-                  <div className="table-container">
-                    <table>
-                      <thead><tr><th>Method</th><th>Type</th><th>Best When</th></tr></thead>
-                      <tbody>
-                        <tr><td style={{ fontWeight: 600 }}>SMOTE</td><td>Over-sampling</td><td>General imbalance</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>ADASYN</td><td>Over-sampling</td><td>Complex decision boundary</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>SMOTE-ENN</td><td>Combined</td><td>Noisy data</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>SMOTE-Tomek</td><td>Combined</td><td>Overlapping classes</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>Random Over</td><td>Over-sampling</td><td>Quick baseline</td></tr>
-                        <tr><td style={{ fontWeight: 600 }}>Random Under</td><td>Under-sampling</td><td>Large datasets</td></tr>
-                      </tbody>
-                    </table>
-                  </div>
+                  {targetCol && balDist ? (
+                    <>
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Target column</div>
+                      <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 24, wordBreak: 'break-all' }}>{targetCol}</div>
 
-                  <div className="cleanup-callout cleanup-callout-warning" style={{ marginTop: 12 }}>
-                    <div className="cleanup-callout-icon">⚠️</div>
-                    <div style={{ fontSize: 12 }}>Balancing is applied to training set only. Validation and test sets remain unchanged.</div>
-                  </div>
+                      <div className="flex gap-lg" style={{ marginBottom: 24 }}>
+                        <div>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Num classes</div>
+                          <div style={{ fontSize: 20, fontWeight: 700 }}>{classesCount || '—'}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Imbalance ratio</div>
+                          <div style={{ fontSize: 20, fontWeight: 700 }}>{ratio ? ratio.toFixed(2) : '—'}</div>
+                        </div>
+                      </div>
+
+                      {beforeRows.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Before balancing:</div>
+                          <ul style={{ margin: '0 0 16px 24px', fontSize: 13, padding: 0, lineHeight: '1.6' }}>
+                            {beforeRows.map((c) => (
+                              <li key={`before-${c.label}`}>Class {c.label}: {c.count} ({c.pct}%)</li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+
+                      {afterRows.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>After balancing:</div>
+                          <ul style={{ margin: '0 0 24px 24px', fontSize: 13, padding: 0, lineHeight: '1.6' }}>
+                            {afterRows.map((c) => (
+                              <li key={`after-${c.label}`}>Class {c.label}: {c.count} ({c.pct}%)</li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+
+                      {beforeRows.length === 0 && afterRows.length === 0 && (
+                        <>
+                          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Distribution per class:</div>
+                          <ul style={{ margin: '0 0 24px 24px', fontSize: 13, padding: 0, lineHeight: '1.6' }}>
+                            {classDetails.map(c => (
+                              <li key={c.label}>Class {c.label}: {c.count} ({c.pct}%)</li>
+                            ))}
+                            {classDetails.length === 0 && <li>No distribution data yet. Click Balance Classes to compute before/after.</li>}
+                          </ul>
+                        </>
+                      )}
+
+                      {ratio >= 1.5 && (
+                        <div className="cleanup-callout cleanup-callout-warning" style={{ backgroundColor: 'rgba(234, 179, 8, 0.15)', borderColor: 'rgba(234, 179, 8, 0.5)', marginBottom: 12 }}>
+                          <div className="cleanup-callout-icon">⚠️</div>
+                          <div style={{ fontSize: 12, fontWeight: 600 }}>Dataset is imbalanced! Ratio: {ratio.toFixed(2)}</div>
+                        </div>
+                      )}
+                      
+                      {ratio >= 1.5 && (
+                        <div className="cleanup-callout cleanup-callout-info" style={{ backgroundColor: 'rgba(59, 130, 246, 0.1)' }}>
+                          <div className="cleanup-callout-icon">💡</div>
+                          <div style={{ fontSize: 12 }}>
+                            Gợi ý: SMOTE recommended - {ratio > 10 ? 'Severe' : 'Moderate'} imbalance
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="empty-state" style={{ padding: '40px 20px' }}>
+                      {targetCol ? 'No distribution data available for target.' : 'Please select a target first to view class distribution.'}
+                    </div>
+                  )}
                 </div>
               </div>
             </>
@@ -1417,10 +1832,45 @@ export default function FeatureEngineeringPage() {
                     disabled={viewOnly || loading || noSplits}
                     onClick={async () => {
                       const data = await run('importance', () => dataApi.featureImportance({ method: impMethod, top_n: impTopN }));
-                      if (data?.importance) setImportanceResults(data.importance);
+                      const normalized = normalizeImportanceResults(data);
+                      setImportanceResults(normalized);
                     }}
                   >
                     ✅ Calculate Importance
+                  </button>
+
+                  <div className="form-group" style={{ marginTop: 16 }}>
+                    <label className="form-label">Select features for model training</label>
+                    <ColumnMultiSelector
+                      label=""
+                      columns={sessionInfo?.split_feature_columns || []}
+                      values={selectedTrainCols}
+                      onChange={setSelectedTrainCols}
+                      disabled={viewOnly || noSplits}
+                      placeholder="Choose training features"
+                      showSelectAll={(sessionInfo?.split_feature_columns || []).length > 0}
+                    />
+                  </div>
+
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    style={{ width: '100%', justifyContent: 'center', marginTop: 8 }}
+                    disabled={viewOnly || loading || noSplits || selectedTrainCols.length === 0}
+                    onClick={async () => {
+                      setLoading(true);
+                      setMessage('');
+                      try {
+                        const res = await dataApi.setSelectedFeatures(selectedTrainCols);
+                        setMessage(res.data?.message || 'Selected features updated');
+                        await loadSessionInfo();
+                      } catch (err) {
+                        setMessage('Error: ' + (err.response?.data?.detail || err.message));
+                      } finally {
+                        setLoading(false);
+                      }
+                    }}
+                  >
+                    💾 Use Selected Features For Training
                   </button>
                 </div>
 
@@ -1437,29 +1887,94 @@ export default function FeatureEngineeringPage() {
                   )}
 
                   {importanceResults && (
-                    <div className="table-container">
-                      <table>
-                        <thead><tr><th>#</th><th>Feature</th><th>Importance</th><th style={{ width: '40%' }}>Bar</th></tr></thead>
-                        <tbody>
-                          {Object.entries(importanceResults)
-                            .sort(([, a], [, b]) => b - a)
-                            .map(([feature, score], i) => (
+                    <>
+                      <div className="flex gap-md" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
+                        <div className="outlier-metric-card" style={{ flex: 1, minWidth: 120, textAlign: 'center' }}>
+                          <div className="outlier-metric-label">Method</div>
+                          <div className="outlier-metric-value" style={{ fontSize: 18 }}>{impMethod}</div>
+                        </div>
+                        <div className="outlier-metric-card" style={{ flex: 1, minWidth: 120, textAlign: 'center' }}>
+                          <div className="outlier-metric-label">Top Features</div>
+                          <div className="outlier-metric-value" style={{ fontSize: 18 }}>{importanceRankedRows.length}</div>
+                        </div>
+                        <div className="outlier-metric-card" style={{ flex: 1, minWidth: 120, textAlign: 'center' }}>
+                          <div className="outlier-metric-label">Selected Train Features</div>
+                          <div className="outlier-metric-value" style={{ fontSize: 18 }}>{sessionInfo?.n_features || selectedTrainCols.length}</div>
+                        </div>
+                      </div>
+
+                      <div className="form-group" style={{ marginBottom: 12 }}>
+                        <label className="form-label">Auto-select threshold: {impThreshold.toFixed(3)}</label>
+                        <input
+                          className="form-input"
+                          type="range"
+                          min="0"
+                          max={Math.max(0.2, importanceMaxScore)}
+                          step="0.001"
+                          value={impThreshold}
+                          onChange={(e) => setImpThreshold(+e.target.value)}
+                          style={{ accentColor: 'var(--warning)' }}
+                        />
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          style={{ marginTop: 8, width: '100%', justifyContent: 'center' }}
+                          disabled={viewOnly || selectedByThreshold.length === 0}
+                          onClick={() => setSelectedTrainCols(selectedByThreshold)}
+                        >
+                          ⚡ Auto-select by Threshold ({selectedByThreshold.length})
+                        </button>
+                      </div>
+
+                      <div className="chart-surface" style={{ marginBottom: 12 }}>
+                        <ResponsiveContainer width="100%" height={300}>
+                          <BarChart
+                            data={importanceRankedRows}
+                            layout="vertical"
+                            margin={{ top: 6, right: 8, left: 20, bottom: 6 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.12)" />
+                            <XAxis type="number" tick={{ fill: 'var(--text-muted)', fontSize: 11 }} />
+                            <YAxis
+                              type="category"
+                              dataKey="feature"
+                              width={140}
+                              tick={{ fill: 'var(--text-muted)', fontSize: 10 }}
+                            />
+                            <Tooltip
+                              contentStyle={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 10 }}
+                              formatter={(value) => [Number(value).toFixed(4), 'Importance']}
+                            />
+                            <Bar dataKey="score" fill="#8b5cf6" radius={[0, 4, 4, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+
+                      <div className="table-container">
+                        <table>
+                          <thead><tr><th>#</th><th>Feature</th><th>Importance</th><th style={{ width: '40%' }}>Bar</th></tr></thead>
+                          <tbody>
+                            {importanceRankedRows.map(({ feature, score }, i) => (
                               <tr key={feature}>
                                 <td>{i + 1}</td>
                                 <td style={{ fontWeight: 600 }}>{feature}</td>
-                                <td>{typeof score === 'number' ? score.toFixed(4) : score}</td>
+                                <td>{score.toFixed(4)}</td>
                                 <td>
                                   <div style={{
                                     height: 8, borderRadius: 4,
                                     background: `linear-gradient(90deg, var(--accent), var(--accent-hover))`,
-                                    width: `${Math.min(100, (typeof score === 'number' ? score : 0) * 100 / Math.max(...Object.values(importanceResults)))}%`,
+                                    width: `${Math.min(100, score * 100 / importanceMaxScore)}%`,
                                   }} />
                                 </td>
                               </tr>
-                            ))
-                          }
-                        </tbody>
-                      </table>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                  {importanceResults && importanceRankedRows.length === 0 && (
+                    <div className="empty-state" style={{ padding: '24px 20px' }}>
+                      Importance analysis completed but returned no feature scores.
                     </div>
                   )}
                 </div>

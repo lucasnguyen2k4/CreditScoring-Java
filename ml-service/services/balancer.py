@@ -63,6 +63,9 @@ def balance_data(
         # Separate features and target
         X = data.drop(columns=[target_column])
         y = data[target_column]
+
+        # Normalize invalid numeric values before any resampling
+        X = X.replace([np.inf, -np.inf], np.nan)
         
         # Handle categorical columns - encode them for SMOTE
         categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
@@ -78,6 +81,23 @@ def balance_data(
                 X_encoded[col] = le.fit_transform(X_encoded[col].astype(str))
                 label_encoders[col] = le
             X = X_encoded
+
+        # Ensure SMOTE-family methods receive finite matrix (no NaN/Inf)
+        # We impute remaining numeric NaN values with column median.
+        numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+        nan_fixes = {}
+        for col in numeric_cols:
+            missing_count = int(X[col].isna().sum())
+            if missing_count > 0:
+                median_val = X[col].median()
+                if pd.isna(median_val):
+                    median_val = 0.0
+                X[col] = X[col].fillna(median_val)
+                nan_fixes[col] = {
+                    "filled_missing": missing_count,
+                    "fill_strategy": "median",
+                    "fill_value": float(median_val),
+                }
         
         # Get original class distribution
         original_dist = y.value_counts().to_dict()
@@ -87,6 +107,11 @@ def balance_data(
             'original_distribution': original_dist,
             'original_size': len(data)
         }
+        if nan_fixes:
+            info['nan_handling'] = {
+                "columns_fixed": len(nan_fixes),
+                "details": nan_fixes,
+            }
         # Shared neighbor setting for SMOTE-like methods
         min_samples = y.value_counts().min()
         k_neighbors = min(5, min_samples - 1) if min_samples > 1 else 1
