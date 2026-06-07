@@ -157,10 +157,10 @@ class SHAPExplainer:
         
         # Create DataFrame with feature contributions
         contributions = pd.DataFrame({
-            'Feature': self.feature_names,
-            'Value': sample_data.values,
-            'SHAP_Value': sample_shap
-        }).sort_values('SHAP_Value', key=abs, ascending=False)
+            'feature': self.feature_names,
+            'value': sample_data.values,
+            'shap_value': sample_shap
+        }).sort_values('shap_value', key=abs, ascending=False)
         
         # Calculate prediction
         base_value = float(self.expected_value) if isinstance(self.expected_value, (int, float, np.number)) else float(self.expected_value)

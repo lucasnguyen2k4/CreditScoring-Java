@@ -1466,7 +1466,7 @@ def apply_binning(req: BinningRequest, x_session_id: str = Header(..., alias="X-
             results[col] = {
                 "iv": round(iv, 4),
                 "n_bins": len(binning_table) - 2,
-                "predictive_power": "Strong" if iv > 0.3 else "Medium" if iv > 0.1 else "Weak" if iv > 0.02 else "Useless",
+                "predictive_power": "Suspicious" if iv >= 0.5 else "Strong" if iv >= 0.3 else "Medium" if iv >= 0.1 else "Weak" if iv >= 0.02 else "Useless",
                 "table": safe_table,
             }
         except Exception as e:
@@ -1564,13 +1564,16 @@ def woe_analysis(req: WoeAnalysisRequest, x_session_id: str = Header(..., alias=
                 except:
                     pass
 
-            if iv > 0.3:
+            if iv >= 0.5:
+                power = "Suspicious"
+                recommendation = "Too good — likely overfitting or data leakage, investigate"
+            elif iv >= 0.3:
                 power = "Strong"
                 recommendation = "Excellent predictor — keep"
-            elif iv > 0.1:
+            elif iv >= 0.1:
                 power = "Medium"
                 recommendation = "Good predictor — keep"
-            elif iv > 0.02:
+            elif iv >= 0.02:
                 power = "Weak"
                 recommendation = "Marginal predictor — consider removing"
             else:
@@ -1594,6 +1597,7 @@ def woe_analysis(req: WoeAnalysisRequest, x_session_id: str = Header(..., alias=
         "message": f"WoE/IV analysis completed on {len(results)} features",
         "results": sorted_results,
         "summary": {
+            "suspicious": sum(1 for v in results.values() if v.get("predictive_power") == "Suspicious"),
             "strong": sum(1 for v in results.values() if v.get("predictive_power") == "Strong"),
             "medium": sum(1 for v in results.values() if v.get("predictive_power") == "Medium"),
             "weak": sum(1 for v in results.values() if v.get("predictive_power") == "Weak"),
@@ -1633,17 +1637,23 @@ def check_multicollinearity(req: MulticollinearityRequest, x_session_id: str = H
     if df_clean.shape[1] < 2:
         df_clean = df_numeric.fillna(df_numeric.median())
 
-    # Calculate VIF
+    # Calculate VIF (must add constant/intercept column, matching EndToEnd)
     from statsmodels.stats.outliers_influence import variance_inflation_factor
+    from statsmodels.tools.tools import add_constant
+
+    df_with_const = add_constant(df_clean)
 
     vif_data = []
     try:
-        for i, col in enumerate(df_clean.columns):
-            vif = variance_inflation_factor(df_clean.values, i)
+        for i, col in enumerate(df_with_const.columns):
+            if col == "const":
+                continue
+            vif = variance_inflation_factor(df_with_const.values, i)
+            display_vif = round(float(vif), 2) if np.isfinite(vif) else 999.99
             vif_data.append({
                 "feature": col,
-                "vif": round(float(vif), 2) if np.isfinite(vif) else 999.99,
-                "high_vif": bool(vif > req.vif_threshold),
+                "vif": display_vif,
+                "high_vif": bool(display_vif > req.vif_threshold),
             })
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"VIF calculation error: {str(e)}")
@@ -1690,6 +1700,65 @@ def check_multicollinearity(req: MulticollinearityRequest, x_session_id: str = H
             "high_vif_count": high_vif_count,
             "high_corr_pairs": len(high_corr_pairs),
         },
+    }
+
+
+# ==================== RESTORE COLUMNS ====================
+
+class RestoreColumnsRequest(BaseModel):
+    columns: List[str]  # Columns to restore from processed_data back into X_train/valid/test
+
+@router.post("/restore-columns")
+def restore_columns(req: RestoreColumnsRequest, x_session_id: str = Header(..., alias="X-Session-ID")):
+    """
+    Restore columns that were accidentally removed (e.g. by VIF auto-remove) back into
+    X_train / X_valid / X_test.
+
+    Uses session.processed_data (pre-split snapshot) and the existing split indices to
+    re-inject the original column values. All other preprocessing work is preserved.
+    """
+    session = get_session(x_session_id)
+
+    if session.X_train is None:
+        raise HTTPException(status_code=400, detail="Data not split yet. Nothing to restore into.")
+
+    source = session.processed_data if session.processed_data is not None else session.raw_data
+    if source is None:
+        raise HTTPException(status_code=404, detail="No processed_data or raw_data available to restore from.")
+
+    target_col = session.target_column
+    # processed_data still contains target; drop it so we work only with features
+    source_X = source.drop(columns=[target_col], errors="ignore") if target_col else source
+
+    restored = []
+    skipped = []
+    for col in req.columns:
+        if col not in source_X.columns:
+            skipped.append({"column": col, "reason": "Not found in processed_data / raw_data"})
+            continue
+        if col in session.X_train.columns:
+            skipped.append({"column": col, "reason": "Already present in X_train — skipping"})
+            continue
+
+        try:
+            session.X_train[col] = source_X.loc[session.X_train.index, col].values
+            if session.X_valid is not None:
+                session.X_valid[col] = source_X.loc[session.X_valid.index, col].values
+            if session.X_test is not None:
+                session.X_test[col] = source_X.loc[session.X_test.index, col].values
+            restored.append(col)
+        except Exception as e:
+            skipped.append({"column": col, "reason": str(e)})
+
+    if restored:
+        session.selected_features = session.X_train.columns.tolist()
+
+    return {
+        "message": f"Restored {len(restored)} column(s) from pre-split data.",
+        "restored": restored,
+        "skipped": skipped,
+        "current_features": session.X_train.columns.tolist(),
+        "n_features": len(session.X_train.columns),
     }
 
 
@@ -1831,18 +1900,26 @@ def scale_data(req: ScalingRequest, x_session_id: str = Header(..., alias="X-Ses
 class FeatureImportanceRequest(BaseModel):
     method: str = "Random Forest"
     top_n: int = 15
+    columns: Optional[List[str]] = None
 
 @router.post("/feature-importance")
 def calculate_importance(req: FeatureImportanceRequest, x_session_id: str = Header(..., alias="X-Session-ID")):
-    """Calculate feature importance"""
+    """Calculate feature importance on selected columns (or all if not specified)"""
     from services.feature_importance import calculate_feature_importance
 
     session = get_session(x_session_id)
     if session.X_train is None or session.y_train is None:
         raise HTTPException(status_code=400, detail="Data not split yet")
 
+    X = session.X_train
+    if req.columns:
+        valid_cols = [c for c in req.columns if c in X.columns]
+        if not valid_cols:
+            raise HTTPException(status_code=400, detail="None of the specified columns exist in training data")
+        X = X[valid_cols]
+
     try:
-        result = calculate_feature_importance(session.X_train, session.y_train, method=req.method, top_n=req.top_n)
+        result = calculate_feature_importance(X, session.y_train, method=req.method, top_n=req.top_n)
         _mark_step_completed(session, "importance")
         return result
     except Exception as e:

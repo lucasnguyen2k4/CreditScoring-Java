@@ -42,6 +42,7 @@ export default function FeatureEngineeringPage() {
   const [vifResults, setVifResults] = useState(null);
   const [corrPairs, setCorrPairs] = useState(null);
   const [autoRemoveVif, setAutoRemoveVif] = useState(false);
+  const [restoreColsInput, setRestoreColsInput] = useState('');
   const [distributionColumn, setDistributionColumn] = useState('');
   const [distributionData, setDistributionData] = useState(null);
   const [distributionLoading, setDistributionLoading] = useState(false);
@@ -1313,7 +1314,7 @@ export default function FeatureEngineeringPage() {
                               <td style={{ fontWeight: 600 }}>{col}</td>
                               <td>{info.iv}</td>
                               <td>{info.n_bins}</td>
-                              <td><span className={`badge ${info.predictive_power === 'Strong' ? 'badge-success' : info.predictive_power === 'Medium' ? 'badge-warning' : 'badge-error'}`}>{info.predictive_power}</span></td>
+                              <td><span className={`badge ${info.predictive_power === 'Suspicious' ? 'badge-error' : info.predictive_power === 'Strong' ? 'badge-success' : info.predictive_power === 'Medium' ? 'badge-warning' : 'badge-error'}`}>{info.predictive_power}</span></td>
                             </tr>
                           ))}
                       </tbody>
@@ -1358,7 +1359,7 @@ export default function FeatureEngineeringPage() {
                   {woeResults && (
                     <>
                       <div className="flex gap-md" style={{ marginTop: 16, flexWrap: 'wrap' }}>
-                        {['Strong', 'Medium', 'Weak', 'Useless'].map(p => (
+                        {['Suspicious', 'Strong', 'Medium', 'Weak', 'Useless'].map(p => (
                           <div key={p} className="outlier-metric-card" style={{ flex: 1, textAlign: 'center', minWidth: 80 }}>
                             <div className="outlier-metric-label">{p}</div>
                             <div className="outlier-metric-value" style={{ fontSize: 20 }}>{woeResults.summary?.[p.toLowerCase()] || 0}</div>
@@ -1410,7 +1411,7 @@ export default function FeatureEngineeringPage() {
                         <tr key={col}>
                           <td style={{ fontWeight: 600 }}>{col}</td>
                           <td>{info.iv}</td>
-                          <td><span className={`badge ${info.predictive_power === 'Strong' ? 'badge-success' : info.predictive_power === 'Medium' ? 'badge-warning' : 'badge-error'}`}>{info.predictive_power}</span></td>
+                          <td><span className={`badge ${info.predictive_power === 'Suspicious' ? 'badge-error' : info.predictive_power === 'Strong' ? 'badge-success' : info.predictive_power === 'Medium' ? 'badge-warning' : 'badge-error'}`}>{info.predictive_power}</span></td>
                           <td style={{ fontSize: 12, color: 'var(--text-muted)' }}>{info.recommendation}</td>
                         </tr>
                       ))}
@@ -1457,6 +1458,37 @@ export default function FeatureEngineeringPage() {
                   >
                     ✅ Check Multicollinearity
                   </button>
+
+                  {/* ── Restore accidentally removed columns ── */}
+                  <div style={{ marginTop: 20, borderTop: '1px solid var(--border)', paddingTop: 16 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6, color: 'var(--warning)' }}>🔄 Restore Removed Columns</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+                      Accidentally removed columns by VIF auto-remove? Type column names (comma-separated) to restore them from the original pre-split data.
+                    </div>
+                    <textarea
+                      className="form-input"
+                      style={{ width: '100%', minHeight: 64, resize: 'vertical', fontFamily: 'monospace', fontSize: 12 }}
+                      placeholder="e.g. annual_income, debt_to_income_ratio, age"
+                      value={restoreColsInput}
+                      onChange={e => setRestoreColsInput(e.target.value)}
+                      disabled={viewOnly}
+                    />
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      style={{ width: '100%', marginTop: 8, justifyContent: 'center' }}
+                      disabled={viewOnly || loading || !restoreColsInput.trim()}
+                      onClick={async () => {
+                        const cols = restoreColsInput.split(',').map(c => c.trim()).filter(Boolean);
+                        if (!cols.length) return;
+                        const data = await run('multicollinearity', () => dataApi.restoreColumns(cols));
+                        if (data?.restored?.length) {
+                          setRestoreColsInput('');
+                        }
+                      }}
+                    >
+                      ⬆️ Restore Columns
+                    </button>
+                  </div>
                 </div>
 
                 <div className="cleanup-panel">
@@ -1812,7 +1844,7 @@ export default function FeatureEngineeringPage() {
                   <div className="form-group">
                     <label className="form-label">Method</label>
                     <select className="form-select" value={impMethod} onChange={e => setImpMethod(e.target.value)} disabled={viewOnly}>
-                      {['Random Forest', 'Gradient Boosting', 'Mutual Information', 'Correlation'].map(m =>
+                      {['Random Forest', 'LightGBM', 'XGBoost', 'Logistic Regression (Coef)'].map(m =>
                         <option key={m} value={m}>{m}</option>
                       )}
                     </select>
@@ -1831,7 +1863,7 @@ export default function FeatureEngineeringPage() {
                     style={{ width: '100%', justifyContent: 'center' }}
                     disabled={viewOnly || loading || noSplits}
                     onClick={async () => {
-                      const data = await run('importance', () => dataApi.featureImportance({ method: impMethod, top_n: impTopN }));
+                      const data = await run('importance', () => dataApi.featureImportance({ method: impMethod, top_n: impTopN, columns: selectedTrainCols.length ? selectedTrainCols : undefined }));
                       const normalized = normalizeImportanceResults(data);
                       setImportanceResults(normalized);
                     }}
@@ -1850,6 +1882,25 @@ export default function FeatureEngineeringPage() {
                       placeholder="Choose training features"
                       showSelectAll={(sessionInfo?.split_feature_columns || []).length > 0}
                     />
+                  </div>
+
+                  <div className="flex gap-sm" style={{ marginTop: 8 }}>
+                    <button
+                      className="btn btn-sm"
+                      style={{ flex: 1, justifyContent: 'center', fontSize: 11, background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }}
+                      disabled={viewOnly || noSplits}
+                      onClick={() => setSelectedTrainCols(prev => prev.filter(c => !c.endsWith('_woe')))}
+                    >
+                      🚫 Remove WoE
+                    </button>
+                    <button
+                      className="btn btn-sm"
+                      style={{ flex: 1, justifyContent: 'center', fontSize: 11, background: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6', border: '1px solid rgba(59, 130, 246, 0.3)' }}
+                      disabled={viewOnly || noSplits}
+                      onClick={() => setSelectedTrainCols(prev => prev.filter(c => c.endsWith('_woe')))}
+                    >
+                      🔄 Only WoE
+                    </button>
                   </div>
 
                   <button

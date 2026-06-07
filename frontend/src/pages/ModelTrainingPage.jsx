@@ -27,6 +27,12 @@ const DEFAULT_STACK_META_PARAMS = {
   XGBoost: { n_estimators: 200, learning_rate: 0.08, max_depth: 4 },
 };
 
+const DEFAULT_STACK_META_PARAM_GRIDS = {
+  'Random Forest': { n_estimators: [100, 200, 300], max_depth: [8, 12, 16] },
+  'Logistic Regression': { C: [0.1, 1.0, 10.0], max_iter: [200, 300, 500] },
+  XGBoost: { n_estimators: [100, 200], learning_rate: [0.05, 0.08, 0.1], max_depth: [3, 4, 5] },
+};
+
 function buildDefaultStackBaseGrid(selectedModels) {
   const cfg = {};
   selectedModels.forEach((m) => {
@@ -119,8 +125,12 @@ export default function ModelTrainingPage() {
     setStackBaseConfigText(
       JSON.stringify(buildDefaultStackBaseGrid(stackBaseModels), null, 2)
     );
+    const useGridDefaults = stackTuningMethod === 'Grid Search' || stackTuningMethod === 'Random Search';
+    const metaDefaults = useGridDefaults
+      ? DEFAULT_STACK_META_PARAM_GRIDS[stackMetaModel]
+      : DEFAULT_STACK_META_PARAMS[stackMetaModel];
     setStackMetaParamsText(
-      JSON.stringify(DEFAULT_STACK_META_PARAMS[stackMetaModel] || {}, null, 2)
+      JSON.stringify(metaDefaults || {}, null, 2)
     );
   };
 
@@ -483,13 +493,20 @@ export default function ModelTrainingPage() {
           </div>
 
           <div className="form-group">
-            <label className="form-label">Meta Model Params (JSON)</label>
+            <label className="form-label">
+              Meta Model Params (JSON)
+              {stackTuningMethod !== 'Default' && (
+                <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> — use lists for grid search</span>
+              )}
+            </label>
             <textarea
               className="form-input"
               rows={4}
               value={stackMetaParamsText}
               onChange={(e) => setStackMetaParamsText(e.target.value)}
-              placeholder='{"n_estimators":200,"max_depth":8}'
+              placeholder={stackTuningMethod === 'Default'
+                ? '{"n_estimators":200,"max_depth":8}'
+                : '{"C":[0.1,1,10],"max_iter":[200,300]}'}
               style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' }}
             />
           </div>

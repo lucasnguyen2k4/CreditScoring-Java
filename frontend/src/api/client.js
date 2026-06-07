@@ -82,6 +82,7 @@ export const dataApi = {
   binning: (data) => api.post('/api/ml/data/binning', data),
   woeAnalysis: (data) => api.post('/api/ml/data/woe-analysis', data),
   multicollinearity: (data) => api.post('/api/ml/data/multicollinearity', data),
+  restoreColumns: (columns) => api.post('/api/ml/data/restore-columns', { columns }),
   balance: (data) => api.post('/api/ml/data/balance', data),
   split: (data) => api.post('/api/ml/data/split', data),
   scale: (data) => api.post('/api/ml/data/scale', data),

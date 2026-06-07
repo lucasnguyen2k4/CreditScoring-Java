@@ -406,7 +406,7 @@ Liệt kê các vấn đề theo thứ tự ưu tiên:
 - Dự đoán khả năng xây dựng mô hình tốt
 - Các lưu ý đặc biệt
 
-Hãy trả lời bằng tiếng Việt, chuyên nghiệp nhưng dễ hiểu."""
+Please respond in English, professionally and clearly."""
 
         return prompt
     

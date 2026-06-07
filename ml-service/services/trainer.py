@@ -442,6 +442,20 @@ def train_stacking_model(X_train, y_train, X_test, y_test,
         raise Exception(f"Error training Stacking model: {str(e)}")
 
 
+def _normalize_param_grid(param_grid: dict) -> dict:
+    """Wrap scalar values in single-element lists for GridSearchCV / RandomizedSearchCV."""
+    if not param_grid:
+        return param_grid
+
+    normalized = {}
+    for key, value in param_grid.items():
+        if isinstance(value, (list, tuple, np.ndarray)):
+            normalized[key] = list(value) if not isinstance(value, np.ndarray) else value.tolist()
+        else:
+            normalized[key] = [value]
+    return normalized
+
+
 def tune_stacking_with_oof(X_train, y_train, X_test, y_test,
                            base_models_config: dict,
                            meta_model: str,
@@ -527,7 +541,7 @@ def tune_stacking_with_oof(X_train, y_train, X_test, y_test,
             elif tuning_method == "Grid Search":
                 model = model_class(**base_params)
                 grid_search = GridSearchCV(
-                    model, param_grid, cv=kfold, scoring='roc_auc', n_jobs=-1
+                    model, _normalize_param_grid(param_grid), cv=kfold, scoring='roc_auc', n_jobs=-1
                 )
                 grid_search.fit(X_train, y_train)
                 best_params_per_model[model_key] = {**base_params, **grid_search.best_params_}
@@ -538,9 +552,10 @@ def tune_stacking_with_oof(X_train, y_train, X_test, y_test,
                 
             elif tuning_method == "Random Search":
                 model = model_class(**base_params)
+                normalized_grid = _normalize_param_grid(param_grid)
                 random_search = RandomizedSearchCV(
-                    model, param_grid, cv=kfold, scoring='roc_auc', 
-                    n_iter=min(10, np.prod([len(v) if isinstance(v, list) else 1 for v in param_grid.values()])),
+                    model, normalized_grid, cv=kfold, scoring='roc_auc', 
+                    n_iter=min(10, np.prod([len(v) for v in normalized_grid.values()])),
                     n_jobs=-1, random_state=random_state
                 )
                 random_search.fit(X_train, y_train)
@@ -599,10 +614,11 @@ def tune_stacking_with_oof(X_train, y_train, X_test, y_test,
         # Tune meta model on OOF predictions
         if meta_model_params and tuning_method != "Default":
             meta_model_instance = meta_model_class(**meta_base_params)
+            meta_param_grid = _normalize_param_grid(meta_model_params)
             
             if tuning_method == "Grid Search":
                 meta_grid_search = GridSearchCV(
-                    meta_model_instance, meta_model_params, 
+                    meta_model_instance, meta_param_grid, 
                     cv=kfold, scoring='roc_auc', n_jobs=-1
                 )
                 meta_grid_search.fit(oof_predictions, y_train)
@@ -613,9 +629,9 @@ def tune_stacking_with_oof(X_train, y_train, X_test, y_test,
                 }
             elif tuning_method == "Random Search":
                 meta_random_search = RandomizedSearchCV(
-                    meta_model_instance, meta_model_params, 
+                    meta_model_instance, meta_param_grid, 
                     cv=kfold, scoring='roc_auc',
-                    n_iter=min(10, np.prod([len(v) if isinstance(v, list) else 1 for v in meta_model_params.values()])),
+                    n_iter=min(10, np.prod([len(v) for v in meta_param_grid.values()])),
                     n_jobs=-1, random_state=random_state
                 )
                 meta_random_search.fit(oof_predictions, y_train)
@@ -625,8 +641,8 @@ def tune_stacking_with_oof(X_train, y_train, X_test, y_test,
                     'best_score': meta_random_search.best_score_
                 }
         else:
-            best_meta_params = meta_base_params
-            tuning_results['META_MODEL'] = {'best_params': meta_base_params, 'best_score': None}
+            best_meta_params = {**meta_base_params, **meta_model_params}
+            tuning_results['META_MODEL'] = {'best_params': best_meta_params, 'best_score': None}
         
         # Step 4: Build final stacking model with tuned params
         estimators = []
